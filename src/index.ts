@@ -35,7 +35,7 @@ const documentExtensions = new Set([".pdf", ".doc", ".docx", ".txt", ".csv", ".m
 const roots = readRoots();
 const apiKey = process.env.CONVERTLY_API_KEY ?? "";
 const baseUrl = (process.env.CONVERTLY_BASE_URL ?? "https://convertly.sh").replace(/\/$/, "");
-const docsBaseUrl = (process.env.CONVERTLY_DOCS_URL ?? "https://docs.convertly.sh").replace(/\/$/, "");
+const docsBaseUrl = "https://docs.convertly.sh";
 const convertlyDocs = createDocsIndex(docsBaseUrl);
 
 const server = new McpServer({
