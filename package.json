@@ -1,0 +1,37 @@
+{
+  "name": "@convertly/mcp",
+  "version": "0.1.0",
+  "description": "Local MCP server for Convertly media workflows over approved filesystem folders.",
+  "type": "module",
+  "bin": {
+    "convertly-mcp": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/index.ts"
+  },
+  "keywords": [
+    "convertly",
+    "mcp",
+    "media",
+    "agents",
+    "filesystem"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "jszip": "^3.10.1",
+    "zod": "^4.4.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "tsx": "^4.21.0",
+    "typescript": "^5"
+  }
+}
