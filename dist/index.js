@@ -15,9 +15,44 @@ const documentExtensions = new Set([".pdf", ".doc", ".docx", ".txt", ".csv", ".m
 const roots = readRoots();
 const apiKey = process.env.CONVERTLY_API_KEY ?? "";
 const baseUrl = (process.env.CONVERTLY_BASE_URL ?? "https://convertly.sh").replace(/\/$/, "");
+const docsBaseUrl = (process.env.CONVERTLY_DOCS_URL ?? "https://docs.convertly.sh").replace(/\/$/, "");
+const convertlyDocs = createDocsIndex(docsBaseUrl);
 const server = new McpServer({
     name: "convertly-local",
     version: "0.1.0",
+});
+server.registerTool("list_convertly_docs", {
+    title: "List Convertly Docs",
+    description: "List available Convertly documentation pages for API, dashboard, storage, MCP, webhooks, and billing guidance.",
+}, async () => jsonResult({ docsBaseUrl, docs: convertlyDocs }));
+server.registerTool("search_convertly_docs", {
+    title: "Search Convertly Docs",
+    description: "Search Convertly documentation pages by topic before calling API or filesystem tools.",
+    inputSchema: {
+        query: z.string().min(1),
+        limit: z.number().int().min(1).max(20).default(8),
+    },
+}, async ({ query, limit }) => {
+    const results = searchDocs(query, limit);
+    return jsonResult({ query, count: results.length, results });
+});
+server.registerTool("get_convertly_doc", {
+    title: "Get Convertly Doc",
+    description: "Fetch a Convertly documentation page by slug or URL and return readable text.",
+    inputSchema: {
+        slugOrUrl: z.string().min(1),
+        maxCharacters: z.number().int().min(1000).max(20000).default(8000),
+    },
+}, async ({ slugOrUrl, maxCharacters }) => {
+    const doc = resolveDoc(slugOrUrl);
+    const response = await fetch(doc.url, {
+        headers: { accept: "text/html,text/markdown,text/plain" },
+    });
+    if (!response.ok)
+        throw new Error(`Could not fetch Convertly doc ${doc.url}: ${response.status}`);
+    const raw = await response.text();
+    const text = readableText(raw).slice(0, maxCharacters);
+    return jsonResult({ ...doc, text, truncated: raw.length > maxCharacters });
 });
 server.registerTool("list_roots", {
     title: "List Approved Roots",
@@ -452,6 +487,94 @@ async function compressFile(filePath, options) {
 function uniqueOutputPath(target) {
     const parsed = path.parse(target);
     return path.join(parsed.dir, `${parsed.name}-${Date.now()}${parsed.ext}`);
+}
+function createDocsIndex(origin) {
+    const page = (slug, title, description, keywords = []) => ({
+        slug,
+        title,
+        url: `${origin}/${slug}`,
+        description,
+        keywords,
+    });
+    return [
+        page("", "Overview", "Start here for Convertly concepts, authentication, and the main API surfaces.", ["quickstart", "overview", "start"]),
+        page("quickstart", "Quickstart", "Make your first authenticated Convertly API request.", ["api key", "curl", "sdk"]),
+        page("authentication", "Authentication", "Use Convertly API keys with Bearer auth or x-api-key headers.", ["api key", "auth", "security"]),
+        page("docs/sdk", "SDK", "Use the Convertly JavaScript SDK for conversion, compression, jobs, storage, and transfer workflows.", ["javascript", "typescript", "sdk"]),
+        page("docs/php-sdk", "PHP SDK", "Use Convertly from PHP applications.", ["php", "sdk"]),
+        page("docs/mcp-agents", "MCP for AI Agents", "Connect Convertly tools and approved local folders to MCP-compatible AI clients.", ["mcp", "claude", "chatgpt", "cursor", "agents"]),
+        page("docs/wordpress-plugin", "WordPress Plugin", "Optimize WordPress media with Convertly.", ["wordpress", "plugin", "media library"]),
+        page("docs/media-conversion", "Media Conversion", "Convert images, video, audio, documents, and archives through the Convertly API.", ["convert", "formats", "image", "video", "audio"]),
+        page("docs/media-tools", "Media Tools", "Use thumbnails, watermarks, PDF previews, metadata tools, trimming, GIFs, and storyboards.", ["thumbnail", "watermark", "pdf", "metadata", "trim"]),
+        page("docs/archive-api", "Archive API", "Create, inspect, and work with archive files.", ["zip", "archive", "tar"]),
+        page("docs/workflows", "Workflows", "Build reusable media workflows for repeatable processing.", ["workflow", "automation"]),
+        page("docs/use-cases", "Use Cases", "Common media automation patterns for products, teams, and agents.", ["examples", "use cases"]),
+        page("docs/async-processing", "Async Processing", "Run longer media work with jobs, polling, and webhooks.", ["jobs", "async", "queue"]),
+        page("docs/files-and-storage", "Files and Storage", "Store, organize, retrieve, and manage files in Convertly Storage.", ["storage", "files", "folders"]),
+        page("docs/transfer-api", "Transfer API", "Fetch public file URLs and return them or save them to Convertly Storage.", ["transfer", "move", "remote url", "storage"]),
+        page("docs/webhooks", "Webhooks", "Receive Convertly events when jobs and workflows complete.", ["webhook", "events"]),
+        page("docs/currency-conversion", "Currency Conversion", "Convert currencies through Convertly utility APIs.", ["currency", "fx", "rates"]),
+        page("limits", "Limits", "Plan limits, quotas, and usage controls.", ["pricing", "quota", "limits", "overage"]),
+        page("errors", "Errors", "Understand Convertly API error shapes and status codes.", ["errors", "status codes"]),
+        page("guides/media-conversion", "Media Conversion Guide", "Design reliable media conversion flows.", ["guide", "convert"]),
+        page("guides/media-tools", "Media Tools Guide", "Apply specialized tools in production workflows.", ["guide", "tools"]),
+        page("guides/archive-api", "Archive API Guide", "Build archive automation with Convertly.", ["guide", "archive"]),
+        page("guides/workflows", "Workflows Guide", "Compose and run multi-step media automation.", ["guide", "workflow"]),
+        page("guides/wordpress-media-optimization", "WordPress Media Optimization", "Optimize WordPress uploads with Convertly.", ["guide", "wordpress"]),
+        page("guides/async-jobs", "Async Jobs Guide", "Use background jobs for larger files and longer-running media tasks.", ["guide", "jobs"]),
+        page("guides/currency", "Currency Guide", "Use Convertly for currency conversion flows.", ["guide", "currency"]),
+        page("guides/webhooks", "Webhooks Guide", "Secure and operate webhook integrations.", ["guide", "webhooks"]),
+    ];
+}
+function searchDocs(query, limit) {
+    const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+    return convertlyDocs
+        .map((doc) => {
+        const haystack = [doc.slug, doc.title, doc.description, ...doc.keywords].join(" ").toLowerCase();
+        const score = terms.reduce((sum, term) => sum + (haystack.includes(term) ? 1 : 0), 0);
+        return { doc, score };
+    })
+        .filter((item) => item.score > 0)
+        .sort((a, b) => b.score - a.score || a.doc.title.localeCompare(b.doc.title))
+        .slice(0, limit)
+        .map((item) => item.doc);
+}
+function resolveDoc(slugOrUrl) {
+    const value = slugOrUrl.trim();
+    const normalized = value.replace(/^\/+/, "").replace(/\/$/, "");
+    const existing = convertlyDocs.find((doc) => doc.slug === normalized || doc.url === value || doc.url.replace(/\/$/, "") === value.replace(/\/$/, ""));
+    if (existing)
+        return existing;
+    if (/^https?:\/\//i.test(value)) {
+        return {
+            slug: value,
+            title: value,
+            url: value,
+            description: "Custom Convertly documentation URL.",
+            keywords: [],
+        };
+    }
+    return {
+        slug: normalized,
+        title: normalized || "Overview",
+        url: `${docsBaseUrl}/${normalized}`,
+        description: "Convertly documentation page.",
+        keywords: [],
+    };
+}
+function readableText(raw) {
+    return raw
+        .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, " ")
+        .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, " ")
+        .replace(/<[^>]+>/g, " ")
+        .replace(/&nbsp;/g, " ")
+        .replace(/&amp;/g, "&")
+        .replace(/&lt;/g, "<")
+        .replace(/&gt;/g, ">")
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/\s+/g, " ")
+        .trim();
 }
 function jsonResult(value) {
     return {
