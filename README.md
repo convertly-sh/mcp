@@ -133,6 +133,7 @@ On Windows, separate approved roots with `;`:
 
 ### Cloud Storage
 - `list_cloud_files` — list files in Convertly cloud storage
+- `download_cloud_file` — get a signed download URL for a cloud file
 - `delete_cloud_file` — delete a file from cloud storage
 - `rename_cloud_file` — rename a file in cloud storage
 - `list_folders` — list folders in cloud storage

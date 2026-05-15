@@ -991,6 +991,16 @@ server.registerTool("create_cloud_folder", {
     });
     return jsonResult(data);
 });
+server.registerTool("download_cloud_file", {
+    title: "Download Cloud File",
+    description: "Get a temporary signed download URL for a file in your Convertly cloud storage. The URL expires in 5 minutes.",
+    inputSchema: { fileId: z.string().uuid() },
+}, async ({ fileId }) => {
+    const data = await apiFetch(`/api/files/${fileId}`, {
+        headers: { Accept: "application/json" },
+    });
+    return jsonResult(data);
+});
 server.registerTool("rename_cloud_file", {
     title: "Rename Cloud File",
     description: "Rename a file in your Convertly cloud storage.",
