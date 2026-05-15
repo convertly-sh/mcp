@@ -1103,24 +1103,70 @@ server.registerTool(
 /*  Main                                                                */
 /* ------------------------------------------------------------------ */
 
+const MAX_HTTP_SESSIONS = Number(process.env.CONVERTLY_MCP_MAX_SESSIONS ?? "100");
+const HTTP_SESSION_TIMEOUT_MS = Number(process.env.CONVERTLY_MCP_SESSION_TIMEOUT_MS ?? "600000");
+
+function setCorsHeaders(res: import("node:http").ServerResponse) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Mcp-Session-Id");
+}
+
 async function main() {
   const httpPort = process.env.CONVERTLY_MCP_HTTP_PORT;
 
   if (httpPort) {
     const port = Number(httpPort);
     const { createServer } = await import("node:http");
-    const transports: Record<string, SSEServerTransport> = {};
+    const transports = new Map<string, { transport: SSEServerTransport; lastActive: number }>();
+    let totalConnections = 0;
+
+    const cleanupIdleSessions = () => {
+      const now = Date.now();
+      for (const [sessionId, session] of transports) {
+        if (now - session.lastActive > HTTP_SESSION_TIMEOUT_MS) {
+          session.transport.close().catch(() => {});
+          transports.delete(sessionId);
+        }
+      }
+    };
+    const cleanupInterval = setInterval(cleanupIdleSessions, 60000);
 
     const httpServer = createServer(async (req, res) => {
       const url = new URL(req.url || "/", `http://${req.headers.host}`);
 
+      if (req.method === "OPTIONS") {
+        setCorsHeaders(res);
+        res.writeHead(204).end();
+        return;
+      }
+
+      setCorsHeaders(res);
+
+      if (req.method === "GET" && url.pathname === "/health") {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "ok", sessions: transports.size, version: "0.2.0" }));
+        return;
+      }
+
       if (req.method === "GET" && url.pathname === "/mcp") {
+        if (transports.size >= MAX_HTTP_SESSIONS) {
+          console.error("Max sessions reached");
+          res.writeHead(503).end("Server at capacity");
+          return;
+        }
         try {
           const transport = new SSEServerTransport("/messages", res);
           const sessionId = transport.sessionId;
-          transports[sessionId] = transport;
-          transport.onclose = () => { delete transports[sessionId]; };
+          transports.set(sessionId, { transport, lastActive: Date.now() });
+          totalConnections++;
+
+          transport.onclose = () => {
+            transports.delete(sessionId);
+          };
+
           await server.connect(transport);
+          console.log(`Session ${sessionId} connected (${transports.size} active)`);
         } catch (error) {
           console.error("SSE connection error:", error);
           if (!res.headersSent) res.writeHead(500).end("SSE error");
@@ -1134,13 +1180,14 @@ async function main() {
           res.writeHead(400).end("Missing sessionId");
           return;
         }
-        const transport = transports[sessionId];
-        if (!transport) {
+        const session = transports.get(sessionId);
+        if (!session) {
           res.writeHead(404).end("Session not found");
           return;
         }
         try {
-          await transport.handlePostMessage(req, res);
+          session.lastActive = Date.now();
+          await session.transport.handlePostMessage(req, res);
         } catch (error) {
           console.error("Message handling error:", error);
           if (!res.headersSent) res.writeHead(500).end("Message error");
@@ -1153,6 +1200,18 @@ async function main() {
 
     httpServer.listen(port, () => {
       console.log(`Convertly MCP HTTP server listening on http://localhost:${port}/mcp`);
+      console.log(`Health check: http://localhost:${port}/health`);
+      console.log(`Max sessions: ${MAX_HTTP_SESSIONS}, Session timeout: ${HTTP_SESSION_TIMEOUT_MS}ms`);
+    });
+
+    process.on("SIGINT", async () => {
+      console.log("Shutting down...");
+      clearInterval(cleanupInterval);
+      for (const [, session] of transports) {
+        await session.transport.close().catch(() => {});
+      }
+      transports.clear();
+      httpServer.close(() => process.exit(0));
     });
   } else {
     await server.connect(new StdioServerTransport());

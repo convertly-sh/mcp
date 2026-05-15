@@ -37,6 +37,15 @@ Then connect to `http://localhost:3000/mcp`.
 
 **Note:** Filesystem tools (`scan_folder`, `move_files`, `create_archive`, `delete_files`, `transfer_url`, `list_roots`, `plan_organize_folder`) return an error in HTTP mode because the server cannot access your local computer. All media processing, docs, jobs, currency, and cloud storage tools still work.
 
+**HTTP configuration:**
+- `CONVERTLY_MCP_HTTP_PORT` — port to listen on
+- `CONVERTLY_MCP_MAX_SESSIONS` — max concurrent SSE sessions (default: 100)
+- `CONVERTLY_MCP_SESSION_TIMEOUT_MS` — idle session timeout in ms (default: 600000 = 10 min)
+- `GET /health` — health check endpoint returning session count and version
+- `OPTIONS` requests are handled for CORS
+- Sessions auto-clean up after timeout
+- Graceful shutdown on SIGINT
+
 ## Install
 
 Configure your MCP client to run the package with `npx`:
