@@ -84,6 +84,31 @@ On Windows, separate approved roots with `;`:
 
 `CONVERTLY_MCP_ROOTS` controls which folders the server can read or write. If omitted, only the current working directory is approved.
 
+### ⚠️ Claude Desktop on Windows — known bug
+
+Claude Desktop has a confirmed bug where it **overwrites `claude_desktop_config.json` on startup**, stripping out any `mcpServers` entries. This affects the Microsoft Store (MSIX) version and other installs.
+
+**The actual config path** (where Claude reads from):
+```
+%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\Claude\claude_desktop_config.json
+```
+
+**The path Claude's "Edit Config" button opens** (which the app does NOT read):
+```
+%APPDATA%\Claude\claude_desktop_config.json
+```
+
+**Workaround:** Use the included PowerShell script to apply and maintain the config:
+
+```powershell
+# From the repo root
+.\scripts\apply-claude-mcp-config.ps1 -ApiKey "ctly_live_..."
+```
+
+If Claude overwrites it again, simply re-run the script. For best results, run it while Claude Desktop is fully closed, then start Claude.
+
+Related issues: [anthropics/claude-code#34359](https://github.com/anthropics/claude-code/issues/34359), [anthropics/claude-code#56296](https://github.com/anthropics/claude-code/issues/56296)
+
 ## Tools
 
 ### Docs
