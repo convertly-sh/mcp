@@ -19,316 +19,11 @@ const docsBaseUrl = "https://docs.convertly.sh";
 const convertlyDocs = createDocsIndex(docsBaseUrl);
 const server = new McpServer({
     name: "convertly-local",
-    version: "0.1.0",
+    version: "0.2.0",
 });
-server.registerTool("list_convertly_docs", {
-    title: "List Convertly Docs",
-    description: "List available Convertly documentation pages for API, dashboard, storage, MCP, webhooks, and billing guidance.",
-}, async () => jsonResult({ docsBaseUrl, docs: convertlyDocs }));
-server.registerTool("search_convertly_docs", {
-    title: "Search Convertly Docs",
-    description: "Search Convertly documentation pages by topic before calling API or filesystem tools.",
-    inputSchema: {
-        query: z.string().min(1),
-        limit: z.number().int().min(1).max(20).default(8),
-    },
-}, async ({ query, limit }) => {
-    const results = searchDocs(query, limit);
-    return jsonResult({ query, count: results.length, results });
-});
-server.registerTool("get_convertly_doc", {
-    title: "Get Convertly Doc",
-    description: "Fetch a Convertly documentation page by slug or URL and return readable text.",
-    inputSchema: {
-        slugOrUrl: z.string().min(1),
-        maxCharacters: z.number().int().min(1000).max(20000).default(8000),
-    },
-}, async ({ slugOrUrl, maxCharacters }) => {
-    const doc = resolveDoc(slugOrUrl);
-    const response = await fetch(doc.url, {
-        headers: { accept: "text/html,text/markdown,text/plain" },
-    });
-    if (!response.ok)
-        throw new Error(`Could not fetch Convertly doc ${doc.url}: ${response.status}`);
-    const raw = await response.text();
-    const text = readableText(raw).slice(0, maxCharacters);
-    return jsonResult({ ...doc, text, truncated: raw.length > maxCharacters });
-});
-server.registerTool("list_roots", {
-    title: "List Approved Roots",
-    description: "List folders this Convertly MCP server is allowed to read and write.",
-}, async () => jsonResult({ roots }));
-server.registerTool("scan_folder", {
-    title: "Scan Folder",
-    description: "Scan an approved folder and return files with size, modified date, and media category.",
-    inputSchema: {
-        folder: z.string(),
-        recursive: z.boolean().default(false),
-        limit: z.number().int().min(1).max(2000).default(300),
-    },
-}, async ({ folder, recursive, limit }) => {
-    const root = resolveAllowed(folder);
-    const files = await scanFolder(root, recursive, limit);
-    return jsonResult({ folder: root, count: files.length, files });
-});
-server.registerTool("plan_organize_folder", {
-    title: "Plan Folder Organization",
-    description: "Create a dry-run plan that groups files into Images, Videos, Audio, Archives, Documents, and Other folders.",
-    inputSchema: {
-        folder: z.string(),
-        recursive: z.boolean().default(false),
-        olderThanDays: z.number().int().min(0).optional(),
-        limit: z.number().int().min(1).max(2000).default(500),
-    },
-}, async ({ folder, recursive, olderThanDays, limit }) => {
-    const root = resolveAllowed(folder);
-    const files = await scanFolder(root, recursive, limit);
-    const cutoff = olderThanDays ? Date.now() - olderThanDays * 24 * 60 * 60 * 1000 : null;
-    const moves = files
-        .filter((file) => (cutoff ? new Date(file.modifiedAt).getTime() < cutoff : true))
-        .map((file) => {
-        const targetDir = path.join(root, labelForKind(file.mediaKind));
-        return {
-            from: file.path,
-            to: path.join(targetDir, file.name),
-            sizeBytes: file.sizeBytes,
-            mediaKind: file.mediaKind,
-        };
-    })
-        .filter((move) => move.from !== move.to);
-    return jsonResult({ dryRun: true, root, moveCount: moves.length, moves });
-});
-server.registerTool("move_files", {
-    title: "Move Files",
-    description: "Move approved files to approved destinations. Requires confirm=true and creates destination folders.",
-    inputSchema: {
-        moves: z.array(z.object({ from: z.string(), to: z.string() })).min(1),
-        confirm: z.boolean().default(false),
-        overwrite: z.boolean().default(false),
-    },
-}, async ({ moves, confirm, overwrite }) => {
-    const resolved = moves.map((move) => ({
-        from: resolveAllowed(move.from),
-        to: resolveAllowed(move.to),
-    }));
-    if (!confirm)
-        return jsonResult({ dryRun: true, wouldMove: resolved, note: "Call again with confirm=true to move files." });
-    const moved = [];
-    for (const move of resolved) {
-        const sourceStat = await stat(move.from);
-        if (!sourceStat.isFile())
-            throw new Error(`Refusing to move non-file path: ${move.from}`);
-        if (!overwrite && await exists(move.to))
-            throw new Error(`Destination already exists: ${move.to}`);
-        await mkdir(path.dirname(move.to), { recursive: true });
-        await rename(move.from, move.to);
-        moved.push(move);
-    }
-    return jsonResult({ movedCount: moved.length, moved });
-});
-server.registerTool("create_archive", {
-    title: "Create ZIP Archive",
-    description: "Create a ZIP archive from approved files or all files in an approved folder. Does not delete originals.",
-    inputSchema: {
-        outputPath: z.string(),
-        files: z.array(z.string()).optional(),
-        folder: z.string().optional(),
-        recursive: z.boolean().default(false),
-        olderThanDays: z.number().int().min(0).optional(),
-        includeMediaOnly: z.boolean().default(false),
-        limit: z.number().int().min(1).max(5000).default(1000),
-    },
-}, async ({ outputPath, files, folder, recursive, olderThanDays, includeMediaOnly, limit }) => {
-    const output = resolveAllowed(outputPath);
-    if (!output.toLowerCase().endsWith(".zip"))
-        throw new Error("outputPath must end with .zip");
-    const inputs = files?.length
-        ? files.map((item) => resolveAllowed(item))
-        : folder
-            ? (await scanFolder(resolveAllowed(folder), recursive, limit)).map((item) => item.path)
-            : [];
-    if (!inputs.length)
-        throw new Error("Provide files or folder.");
-    const cutoff = olderThanDays ? Date.now() - olderThanDays * 24 * 60 * 60 * 1000 : null;
-    const selected = [];
-    for (const input of inputs) {
-        const s = await stat(input);
-        if (!s.isFile())
-            continue;
-        const entry = toEntry(input, s);
-        if (cutoff && new Date(entry.modifiedAt).getTime() >= cutoff)
-            continue;
-        if (includeMediaOnly && !["image", "video", "audio"].includes(entry.mediaKind))
-            continue;
-        selected.push(entry);
-        if (selected.length >= limit)
-            break;
-    }
-    const zip = new JSZip();
-    for (const file of selected) {
-        zip.file(file.name, createReadStream(file.path));
-    }
-    await mkdir(path.dirname(output), { recursive: true });
-    const buffer = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE", compressionOptions: { level: 6 } });
-    await writeFile(output, buffer);
-    return jsonResult({ outputPath: output, archivedCount: selected.length, sizeBytes: buffer.byteLength });
-});
-server.registerTool("convert_media", {
-    title: "Convert Media",
-    description: "Convert approved local media files using the Convertly API and write results locally.",
-    inputSchema: {
-        files: z.array(z.string()).optional(),
-        folder: z.string().optional(),
-        outputFolder: z.string(),
-        format: z.string().min(1),
-        recursive: z.boolean().default(false),
-        compression: z.number().int().min(1).max(100).default(82),
-        resize: z.string().optional(),
-        resizeWidth: z.number().int().min(1).optional(),
-        resizeHeight: z.number().int().min(1).optional(),
-        limit: z.number().int().min(1).max(500).default(100),
-    },
-}, async ({ files, folder, outputFolder, format, recursive, compression, resize, resizeWidth, resizeHeight, limit }) => {
-    if (!apiKey)
-        throw new Error("CONVERTLY_API_KEY is required for conversion.");
-    const outputDir = resolveAllowed(outputFolder);
-    const inputs = files?.length
-        ? files.map((item) => resolveAllowed(item))
-        : folder
-            ? (await scanFolder(resolveAllowed(folder), recursive, limit)).filter((item) => ["image", "video", "audio", "archive", "document"].includes(item.mediaKind)).map((item) => item.path)
-            : [];
-    if (!inputs.length)
-        throw new Error("Provide media files or a folder.");
-    await mkdir(outputDir, { recursive: true });
-    const converted = [];
-    for (const input of inputs.slice(0, limit)) {
-        const s = await stat(input);
-        if (!s.isFile())
-            continue;
-        const entry = toEntry(input, s);
-        const buffer = await convertFile(input, {
-            format,
-            compression,
-            resize,
-            resizeWidth,
-            resizeHeight,
-        });
-        const target = uniqueOutputPath(path.join(outputDir, `${path.basename(entry.name, entry.extension)}.${format}`));
-        await writeFile(target, buffer);
-        converted.push({ from: input, to: target, originalBytes: entry.sizeBytes, outputBytes: buffer.byteLength });
-    }
-    return jsonResult({ convertedCount: converted.length, converted });
-});
-server.registerTool("compress_media", {
-    title: "Compress Media",
-    description: "Compress approved local image, video, or audio files using the Convertly API and write results locally.",
-    inputSchema: {
-        files: z.array(z.string()).optional(),
-        folder: z.string().optional(),
-        outputFolder: z.string(),
-        recursive: z.boolean().default(false),
-        mode: z.enum(["quality", "target-size"]).default("quality"),
-        quality: z.number().int().min(1).max(100).default(82),
-        targetBytes: z.number().int().min(1).optional(),
-        lossless: z.boolean().default(false),
-        stripMetadata: z.boolean().default(true),
-        limit: z.number().int().min(1).max(500).default(100),
-    },
-}, async ({ files, folder, outputFolder, recursive, mode, quality, targetBytes, lossless, stripMetadata, limit }) => {
-    if (!apiKey)
-        throw new Error("CONVERTLY_API_KEY is required for compression.");
-    const outputDir = resolveAllowed(outputFolder);
-    const inputs = files?.length
-        ? files.map((item) => resolveAllowed(item))
-        : folder
-            ? (await scanFolder(resolveAllowed(folder), recursive, limit)).filter((item) => ["image", "video", "audio"].includes(item.mediaKind)).map((item) => item.path)
-            : [];
-    if (!inputs.length)
-        throw new Error("Provide image, video, or audio files or a folder.");
-    await mkdir(outputDir, { recursive: true });
-    const compressed = [];
-    for (const input of inputs.slice(0, limit)) {
-        const s = await stat(input);
-        if (!s.isFile())
-            continue;
-        const entry = toEntry(input, s);
-        const buffer = await compressFile(input, {
-            mode,
-            quality,
-            targetBytes,
-            lossless,
-            stripMetadata,
-        });
-        const target = uniqueOutputPath(path.join(outputDir, entry.name));
-        await writeFile(target, buffer);
-        compressed.push({ from: input, to: target, originalBytes: entry.sizeBytes, outputBytes: buffer.byteLength });
-    }
-    return jsonResult({ compressedCount: compressed.length, compressed });
-});
-server.registerTool("convert_images_to_webp", {
-    title: "Convert Images To WebP",
-    description: "Convenience wrapper around convert_media for converting approved local images to WebP.",
-    inputSchema: {
-        files: z.array(z.string()).optional(),
-        folder: z.string().optional(),
-        outputFolder: z.string(),
-        recursive: z.boolean().default(false),
-        quality: z.number().int().min(1).max(100).default(82),
-        limit: z.number().int().min(1).max(500).default(100),
-    },
-}, async ({ files, folder, outputFolder, recursive, quality, limit }) => {
-    if (!apiKey)
-        throw new Error("CONVERTLY_API_KEY is required for conversion.");
-    const outputDir = resolveAllowed(outputFolder);
-    const inputs = files?.length
-        ? files.map((item) => resolveAllowed(item))
-        : folder
-            ? (await scanFolder(resolveAllowed(folder), recursive, limit)).filter((item) => item.mediaKind === "image").map((item) => item.path)
-            : [];
-    if (!inputs.length)
-        throw new Error("Provide image files or a folder.");
-    await mkdir(outputDir, { recursive: true });
-    const converted = [];
-    for (const input of inputs.slice(0, limit)) {
-        const s = await stat(input);
-        if (!s.isFile())
-            continue;
-        const entry = toEntry(input, s);
-        if (entry.mediaKind !== "image")
-            continue;
-        const buffer = await convertFile(input, { format: "webp", compression: quality });
-        const target = uniqueOutputPath(path.join(outputDir, `${path.basename(entry.name, entry.extension)}.webp`));
-        await writeFile(target, buffer);
-        converted.push({ from: input, to: target, originalBytes: entry.sizeBytes, outputBytes: buffer.byteLength });
-    }
-    return jsonResult({ convertedCount: converted.length, converted });
-});
-server.registerTool("delete_files", {
-    title: "Delete Files",
-    description: "Delete approved files. Requires confirm=true. Prefer calling scan_folder or plan_organize_folder first.",
-    inputSchema: {
-        files: z.array(z.string()).min(1),
-        confirm: z.boolean().default(false),
-    },
-}, async ({ files, confirm }) => {
-    const targets = files.map((item) => resolveAllowed(item));
-    if (!confirm)
-        return jsonResult({ dryRun: true, wouldDelete: targets, note: "Call again with confirm=true to delete." });
-    for (const target of targets) {
-        const s = await stat(target);
-        if (!s.isFile())
-            throw new Error(`Refusing to delete non-file path: ${target}`);
-        await rm(target);
-    }
-    return jsonResult({ deletedCount: targets.length, deleted: targets });
-});
-async function main() {
-    await server.connect(new StdioServerTransport());
-}
-main().catch((error) => {
-    console.error(error);
-    process.exit(1);
-});
+/* ------------------------------------------------------------------ */
+/*  Shared helpers                                                      */
+/* ------------------------------------------------------------------ */
 function readRoots() {
     const raw = process.env.CONVERTLY_MCP_ROOTS;
     const values = raw?.trim()
@@ -393,18 +88,12 @@ function kindForExtension(extension) {
 }
 function labelForKind(kind) {
     switch (kind) {
-        case "image":
-            return "Images";
-        case "video":
-            return "Videos";
-        case "audio":
-            return "Audio";
-        case "archive":
-            return "Archives";
-        case "document":
-            return "Documents";
-        default:
-            return "Other";
+        case "image": return "Images";
+        case "video": return "Videos";
+        case "audio": return "Audio";
+        case "archive": return "Archives";
+        case "document": return "Documents";
+        default: return "Other";
     }
 }
 async function exists(target) {
@@ -416,85 +105,810 @@ async function exists(target) {
         return false;
     }
 }
-async function convertFile(filePath, options) {
-    const form = new FormData();
-    const data = await readFile(filePath);
-    form.append("files", new Blob([data]), path.basename(filePath));
-    form.append("format", options.format);
-    if (options.compression !== undefined)
-        form.append("compression", String(options.compression));
-    if (options.resize)
-        form.append("resize", options.resize);
-    if (options.resizeWidth !== undefined)
-        form.append("resizeWidth", String(options.resizeWidth));
-    if (options.resizeHeight !== undefined)
-        form.append("resizeHeight", String(options.resizeHeight));
-    form.append("saveToStorage", "false");
-    const response = await fetch(`${baseUrl}/api/convert`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${apiKey}` },
-        body: form,
-    });
-    const payload = await response.json();
-    if (!response.ok)
-        throw new Error(payload.error ?? `Convertly API returned ${response.status}`);
-    const first = payload.files?.[0];
-    if (!first?.downloadUrl)
-        throw new Error("Convertly API did not return a converted file.");
-    if (first.downloadUrl.startsWith("data:")) {
-        const comma = first.downloadUrl.indexOf(",");
-        return Buffer.from(first.downloadUrl.slice(comma + 1), "base64");
-    }
-    const fileResponse = await fetch(first.downloadUrl);
-    if (!fileResponse.ok)
-        throw new Error(`Could not download converted file: ${fileResponse.status}`);
-    return Buffer.from(await fileResponse.arrayBuffer());
-}
-async function compressFile(filePath, options) {
-    const form = new FormData();
-    const data = await readFile(filePath);
-    form.append("files", new Blob([data]), path.basename(filePath));
-    form.append("mode", options.mode);
-    if (options.quality !== undefined)
-        form.append("quality", String(options.quality));
-    if (options.targetBytes !== undefined)
-        form.append("targetBytes", String(options.targetBytes));
-    if (options.lossless !== undefined)
-        form.append("lossless", options.lossless ? "true" : "false");
-    if (options.stripMetadata !== undefined)
-        form.append("stripMetadata", options.stripMetadata ? "true" : "false");
-    form.append("saveToStorage", "false");
-    const response = await fetch(`${baseUrl}/api/compress`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${apiKey}` },
-        body: form,
-    });
-    const payload = await response.json();
-    if (!response.ok)
-        throw new Error(payload.error ?? `Convertly API returned ${response.status}`);
-    const first = payload.files?.[0];
-    if (!first?.downloadUrl)
-        throw new Error("Convertly API did not return a compressed file.");
-    if (first.downloadUrl.startsWith("data:")) {
-        const comma = first.downloadUrl.indexOf(",");
-        return Buffer.from(first.downloadUrl.slice(comma + 1), "base64");
-    }
-    const fileResponse = await fetch(first.downloadUrl);
-    if (!fileResponse.ok)
-        throw new Error(`Could not download compressed file: ${fileResponse.status}`);
-    return Buffer.from(await fileResponse.arrayBuffer());
-}
 function uniqueOutputPath(target) {
     const parsed = path.parse(target);
     return path.join(parsed.dir, `${parsed.name}-${Date.now()}${parsed.ext}`);
 }
+function jsonResult(value) {
+    return {
+        content: [{ type: "text", text: JSON.stringify(value, null, 2) }],
+    };
+}
+async function apiFetch(endpoint, init) {
+    const url = endpoint.startsWith("http") ? endpoint : `${baseUrl}${endpoint}`;
+    const response = await fetch(url, {
+        ...(init ?? {}),
+        headers: {
+            Authorization: `Bearer ${apiKey}`,
+            Accept: "application/json",
+            ...(init?.headers ?? {}),
+        },
+    });
+    const text = await response.text();
+    const data = text ? JSON.parse(text) : {};
+    if (!response.ok)
+        throw new Error(data.error ?? `API error ${response.status}`);
+    return data;
+}
+async function downloadToBuffer(url) {
+    if (url.startsWith("data:")) {
+        const comma = url.indexOf(",");
+        return Buffer.from(url.slice(comma + 1), "base64");
+    }
+    const response = await fetch(url);
+    if (!response.ok)
+        throw new Error(`Download failed: ${response.status}`);
+    return Buffer.from(await response.arrayBuffer());
+}
+async function resolveMediaInputs(files, folder, recursive, limit, acceptKinds) {
+    const inputs = files?.length
+        ? files.map((item) => resolveAllowed(item))
+        : folder
+            ? (await scanFolder(resolveAllowed(folder), recursive, limit)).filter((item) => !acceptKinds || acceptKinds.includes(item.mediaKind)).map((item) => item.path)
+            : [];
+    if (!inputs.length)
+        throw new Error("Provide media files or a folder.");
+    return inputs.slice(0, limit);
+}
+async function postMediaFile(endpoint, filePath, extraParams) {
+    const form = new FormData();
+    const data = await readFile(filePath);
+    form.append("files", new Blob([data]), path.basename(filePath));
+    for (const [key, value] of Object.entries(extraParams)) {
+        if (value !== undefined && value !== null && value !== "")
+            form.append(key, String(value));
+    }
+    form.append("saveToStorage", "false");
+    const response = await fetch(`${baseUrl}${endpoint}`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apiKey}` },
+        body: form,
+    });
+    const payload = await response.json();
+    if (!response.ok)
+        throw new Error(payload.error ?? `API returned ${response.status}`);
+    const first = payload.files?.[0];
+    if (!first?.downloadUrl)
+        throw new Error("API did not return a processed file.");
+    return { downloadUrl: first.downloadUrl, filename: first.filename ?? path.basename(filePath) };
+}
+async function processMediaTool(endpoint, options) {
+    if (!apiKey)
+        throw new Error("CONVERTLY_API_KEY is required.");
+    const outputDir = resolveAllowed(options.outputFolder);
+    const inputs = await resolveMediaInputs(options.files, options.folder, options.recursive ?? false, options.limit ?? 100, options.acceptKinds);
+    await mkdir(outputDir, { recursive: true });
+    const results = [];
+    for (const input of inputs) {
+        const s = await stat(input);
+        if (!s.isFile())
+            continue;
+        const entry = toEntry(input, s);
+        const { downloadUrl } = await postMediaFile(endpoint, input, options.params);
+        const buffer = await downloadToBuffer(downloadUrl);
+        const ext = options.outputExt ? options.outputExt(entry) : entry.extension;
+        const target = uniqueOutputPath(path.join(outputDir, `${path.basename(entry.name, entry.extension)}${ext}`));
+        await writeFile(target, buffer);
+        results.push({ from: input, to: target, originalBytes: entry.sizeBytes, outputBytes: buffer.byteLength });
+    }
+    return { processedCount: results.length, results };
+}
+/* ------------------------------------------------------------------ */
+/*  Docs tools                                                          */
+/* ------------------------------------------------------------------ */
+server.registerTool("list_convertly_docs", { title: "List Convertly Docs", description: "List available Convertly documentation pages for API, dashboard, storage, MCP, webhooks, and billing guidance." }, async () => jsonResult({ docsBaseUrl, docs: convertlyDocs }));
+server.registerTool("search_convertly_docs", {
+    title: "Search Convertly Docs",
+    description: "Search Convertly documentation pages by topic before calling API or filesystem tools.",
+    inputSchema: { query: z.string().min(1), limit: z.number().int().min(1).max(20).default(8) },
+}, async ({ query, limit }) => jsonResult({ query, count: searchDocs(query, limit).length, results: searchDocs(query, limit) }));
+server.registerTool("get_convertly_doc", {
+    title: "Get Convertly Doc",
+    description: "Fetch a Convertly documentation page by slug or URL and return readable text.",
+    inputSchema: { slugOrUrl: z.string().min(1), maxCharacters: z.number().int().min(1000).max(20000).default(8000) },
+}, async ({ slugOrUrl, maxCharacters }) => {
+    const doc = resolveDoc(slugOrUrl);
+    const response = await fetch(doc.url, { headers: { accept: "text/html,text/markdown,text/plain" } });
+    if (!response.ok)
+        throw new Error(`Could not fetch doc ${doc.url}: ${response.status}`);
+    const raw = await response.text();
+    const text = readableText(raw).slice(0, maxCharacters);
+    return jsonResult({ ...doc, text, truncated: raw.length > maxCharacters });
+});
+/* ------------------------------------------------------------------ */
+/*  Filesystem tools                                                    */
+/* ------------------------------------------------------------------ */
+server.registerTool("list_roots", { title: "List Approved Roots", description: "List folders this Convertly MCP server is allowed to read and write." }, async () => jsonResult({ roots }));
+server.registerTool("scan_folder", {
+    title: "Scan Folder",
+    description: "Scan an approved folder and return files with size, modified date, and media category.",
+    inputSchema: { folder: z.string(), recursive: z.boolean().default(false), limit: z.number().int().min(1).max(2000).default(300) },
+}, async ({ folder, recursive, limit }) => {
+    const root = resolveAllowed(folder);
+    const files = await scanFolder(root, recursive, limit);
+    return jsonResult({ folder: root, count: files.length, files });
+});
+server.registerTool("plan_organize_folder", {
+    title: "Plan Folder Organization",
+    description: "Create a dry-run plan that groups files into Images, Videos, Audio, Archives, Documents, and Other folders.",
+    inputSchema: { folder: z.string(), recursive: z.boolean().default(false), olderThanDays: z.number().int().min(0).optional(), limit: z.number().int().min(1).max(2000).default(500) },
+}, async ({ folder, recursive, olderThanDays, limit }) => {
+    const root = resolveAllowed(folder);
+    const files = await scanFolder(root, recursive, limit);
+    const cutoff = olderThanDays ? Date.now() - olderThanDays * 24 * 60 * 60 * 1000 : null;
+    const moves = files
+        .filter((file) => (cutoff ? new Date(file.modifiedAt).getTime() < cutoff : true))
+        .map((file) => ({ from: file.path, to: path.join(root, labelForKind(file.mediaKind), file.name), sizeBytes: file.sizeBytes, mediaKind: file.mediaKind }))
+        .filter((move) => move.from !== move.to);
+    return jsonResult({ dryRun: true, root, moveCount: moves.length, moves });
+});
+server.registerTool("move_files", {
+    title: "Move Files",
+    description: "Move approved files to approved destinations. Requires confirm=true and creates destination folders.",
+    inputSchema: { moves: z.array(z.object({ from: z.string(), to: z.string() })).min(1), confirm: z.boolean().default(false), overwrite: z.boolean().default(false) },
+}, async ({ moves, confirm, overwrite }) => {
+    const resolved = moves.map((move) => ({ from: resolveAllowed(move.from), to: resolveAllowed(move.to) }));
+    if (!confirm)
+        return jsonResult({ dryRun: true, wouldMove: resolved, note: "Call again with confirm=true to move files." });
+    const moved = [];
+    for (const move of resolved) {
+        const sourceStat = await stat(move.from);
+        if (!sourceStat.isFile())
+            throw new Error(`Refusing to move non-file path: ${move.from}`);
+        if (!overwrite && await exists(move.to))
+            throw new Error(`Destination already exists: ${move.to}`);
+        await mkdir(path.dirname(move.to), { recursive: true });
+        await rename(move.from, move.to);
+        moved.push(move);
+    }
+    return jsonResult({ movedCount: moved.length, moved });
+});
+server.registerTool("create_archive", {
+    title: "Create ZIP Archive",
+    description: "Create a ZIP archive from approved files or all files in an approved folder. Does not delete originals.",
+    inputSchema: {
+        outputPath: z.string(),
+        files: z.array(z.string()).optional(),
+        folder: z.string().optional(),
+        recursive: z.boolean().default(false),
+        olderThanDays: z.number().int().min(0).optional(),
+        includeMediaOnly: z.boolean().default(false),
+        limit: z.number().int().min(1).max(5000).default(1000),
+    },
+}, async ({ outputPath, files, folder, recursive, olderThanDays, includeMediaOnly, limit }) => {
+    const output = resolveAllowed(outputPath);
+    if (!output.toLowerCase().endsWith(".zip"))
+        throw new Error("outputPath must end with .zip");
+    const inputs = files?.length
+        ? files.map((item) => resolveAllowed(item))
+        : folder
+            ? (await scanFolder(resolveAllowed(folder), recursive, limit)).map((item) => item.path)
+            : [];
+    if (!inputs.length)
+        throw new Error("Provide files or folder.");
+    const cutoff = olderThanDays ? Date.now() - olderThanDays * 24 * 60 * 60 * 1000 : null;
+    const selected = [];
+    for (const input of inputs) {
+        const s = await stat(input);
+        if (!s.isFile())
+            continue;
+        const entry = toEntry(input, s);
+        if (cutoff && new Date(entry.modifiedAt).getTime() >= cutoff)
+            continue;
+        if (includeMediaOnly && !["image", "video", "audio"].includes(entry.mediaKind))
+            continue;
+        selected.push(entry);
+        if (selected.length >= limit)
+            break;
+    }
+    const zip = new JSZip();
+    for (const file of selected) {
+        zip.file(file.name, createReadStream(file.path));
+    }
+    await mkdir(path.dirname(output), { recursive: true });
+    const buffer = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE", compressionOptions: { level: 6 } });
+    await writeFile(output, buffer);
+    return jsonResult({ outputPath: output, archivedCount: selected.length, sizeBytes: buffer.byteLength });
+});
+server.registerTool("delete_files", {
+    title: "Delete Files",
+    description: "Delete approved files. Requires confirm=true. Prefer calling scan_folder or plan_organize_folder first.",
+    inputSchema: { files: z.array(z.string()).min(1), confirm: z.boolean().default(false) },
+}, async ({ files, confirm }) => {
+    const targets = files.map((item) => resolveAllowed(item));
+    if (!confirm)
+        return jsonResult({ dryRun: true, wouldDelete: targets, note: "Call again with confirm=true to delete." });
+    for (const target of targets) {
+        const s = await stat(target);
+        if (!s.isFile())
+            throw new Error(`Refusing to delete non-file path: ${target}`);
+        await rm(target);
+    }
+    return jsonResult({ deletedCount: targets.length, deleted: targets });
+});
+/* ------------------------------------------------------------------ */
+/*  Core conversion & compression                                       */
+/* ------------------------------------------------------------------ */
+server.registerTool("convert_media", {
+    title: "Convert Media",
+    description: "Convert approved local media files using the Convertly API and write results locally.",
+    inputSchema: {
+        files: z.array(z.string()).optional(),
+        folder: z.string().optional(),
+        outputFolder: z.string(),
+        format: z.string().min(1),
+        recursive: z.boolean().default(false),
+        compression: z.number().int().min(1).max(100).default(82),
+        resize: z.string().optional(),
+        resizeWidth: z.number().int().min(1).optional(),
+        resizeHeight: z.number().int().min(1).optional(),
+        limit: z.number().int().min(1).max(500).default(100),
+    },
+}, async ({ files, folder, outputFolder, format, recursive, compression, resize, resizeWidth, resizeHeight, limit }) => {
+    const result = await processMediaTool("/api/convert", {
+        files, folder, outputFolder, recursive, limit,
+        params: { format, compression: String(compression), resize: resize ?? "", resizeWidth: resizeWidth ? String(resizeWidth) : "", resizeHeight: resizeHeight ? String(resizeHeight) : "" },
+    });
+    return jsonResult({ convertedCount: result.processedCount, converted: result.results });
+});
+server.registerTool("compress_media", {
+    title: "Compress Media",
+    description: "Compress approved local image, video, or audio files using the Convertly API and write results locally.",
+    inputSchema: {
+        files: z.array(z.string()).optional(),
+        folder: z.string().optional(),
+        outputFolder: z.string(),
+        recursive: z.boolean().default(false),
+        mode: z.enum(["quality", "target-size"]).default("quality"),
+        quality: z.number().int().min(1).max(100).default(82),
+        targetBytes: z.number().int().min(1).optional(),
+        lossless: z.boolean().default(false),
+        stripMetadata: z.boolean().default(true),
+        limit: z.number().int().min(1).max(500).default(100),
+    },
+}, async ({ files, folder, outputFolder, recursive, mode, quality, targetBytes, lossless, stripMetadata, limit }) => {
+    const result = await processMediaTool("/api/compress", {
+        files, folder, outputFolder, recursive, limit,
+        params: { mode, quality: String(quality), targetBytes: targetBytes ? String(targetBytes) : "", lossless: String(lossless), stripMetadata: String(stripMetadata) },
+    });
+    return jsonResult({ compressedCount: result.processedCount, compressed: result.results });
+});
+/* ------------------------------------------------------------------ */
+/*  Media tools                                                         */
+/* ------------------------------------------------------------------ */
+server.registerTool("remove_background", {
+    title: "Remove Background",
+    description: "Remove the background from local image files using AI and save transparent cutouts locally.",
+    inputSchema: {
+        files: z.array(z.string()).optional(),
+        folder: z.string().optional(),
+        outputFolder: z.string(),
+        recursive: z.boolean().default(false),
+        format: z.enum(["png", "webp", "jpg"]).default("png"),
+        model: z.enum(["small", "medium", "large"]).default("medium"),
+        quality: z.number().int().min(1).max(100).default(92),
+        trim: z.boolean().default(false),
+        force: z.boolean().default(false),
+        limit: z.number().int().min(1).max(500).default(100),
+    },
+}, async ({ files, folder, outputFolder, recursive, format, model, quality, trim, force, limit }) => {
+    const result = await processMediaTool("/api/media/remove-background", {
+        files, folder, outputFolder, recursive, limit,
+        acceptKinds: ["image"],
+        params: { format, model, quality: String(quality), trim: String(trim), force: String(force) },
+        outputExt: (entry) => `.${format}`,
+    });
+    return jsonResult({ processedCount: result.processedCount, results: result.results });
+});
+server.registerTool("transform_image", {
+    title: "Transform Image",
+    description: "Resize, crop, rotate, flip, and format-shift local images using Convertly.",
+    inputSchema: {
+        files: z.array(z.string()).optional(),
+        folder: z.string().optional(),
+        outputFolder: z.string(),
+        recursive: z.boolean().default(false),
+        format: z.enum(["jpg", "png", "webp", "avif"]).default("webp"),
+        preset: z.enum(["ecommerce", "avatar", "blog-hero", "social-preview"]).optional(),
+        width: z.number().int().min(1).optional(),
+        height: z.number().int().min(1).optional(),
+        fit: z.enum(["cover", "contain", "fill", "inside", "outside"]).default("cover"),
+        rotate: z.number().int().default(0),
+        flip: z.boolean().default(false),
+        flop: z.boolean().default(false),
+        quality: z.number().int().min(1).max(100).default(86),
+        cropLeft: z.number().int().min(0).optional(),
+        cropTop: z.number().int().min(0).optional(),
+        cropWidth: z.number().int().min(1).optional(),
+        cropHeight: z.number().int().min(1).optional(),
+        limit: z.number().int().min(1).max(500).default(100),
+    },
+}, async ({ files, folder, outputFolder, recursive, format, preset, width, height, fit, rotate, flip, flop, quality, cropLeft, cropTop, cropWidth, cropHeight, limit }) => {
+    const result = await processMediaTool("/api/media/transform", {
+        files, folder, outputFolder, recursive, limit,
+        acceptKinds: ["image"],
+        params: {
+            format, preset: preset ?? "", width: width ? String(width) : "", height: height ? String(height) : "",
+            fit, rotate: String(rotate), flip: String(flip), flop: String(flop), quality: String(quality),
+            cropLeft: cropLeft !== undefined ? String(cropLeft) : "", cropTop: cropTop !== undefined ? String(cropTop) : "",
+            cropWidth: cropWidth !== undefined ? String(cropWidth) : "", cropHeight: cropHeight !== undefined ? String(cropHeight) : "",
+        },
+        outputExt: (entry) => `.${format}`,
+    });
+    return jsonResult({ processedCount: result.processedCount, results: result.results });
+});
+server.registerTool("generate_thumbnail", {
+    title: "Generate Thumbnail",
+    description: "Create thumbnails from local images or videos.",
+    inputSchema: {
+        files: z.array(z.string()).optional(),
+        folder: z.string().optional(),
+        outputFolder: z.string(),
+        recursive: z.boolean().default(false),
+        format: z.enum(["jpg", "png", "webp", "avif"]).default("jpg"),
+        width: z.number().int().min(1).default(512),
+        height: z.number().int().min(1).default(512),
+        fit: z.enum(["cover", "contain", "inside"]).default("cover"),
+        quality: z.number().int().min(1).max(100).default(82),
+        timestamp: z.number().default(1),
+        limit: z.number().int().min(1).max(500).default(100),
+    },
+}, async ({ files, folder, outputFolder, recursive, format, width, height, fit, quality, timestamp, limit }) => {
+    const result = await processMediaTool("/api/media/thumbnail", {
+        files, folder, outputFolder, recursive, limit,
+        acceptKinds: ["image", "video"],
+        params: { format, width: String(width), height: String(height), fit, quality: String(quality), timestamp: String(timestamp) },
+        outputExt: (entry) => `.${format}`,
+    });
+    return jsonResult({ processedCount: result.processedCount, results: result.results });
+});
+server.registerTool("watermark_media", {
+    title: "Watermark Media",
+    description: "Add text or logo watermarks to local images and videos.",
+    inputSchema: {
+        files: z.array(z.string()).optional(),
+        folder: z.string().optional(),
+        outputFolder: z.string(),
+        recursive: z.boolean().default(false),
+        text: z.string().optional(),
+        logoFile: z.string().optional(),
+        position: z.enum(["top-left", "top-right", "bottom-left", "bottom-right", "center"]).default("bottom-right"),
+        opacity: z.number().min(0).max(1).default(0.72),
+        margin: z.number().int().min(0).default(32),
+        watermarkWidth: z.number().int().min(1).optional(),
+        limit: z.number().int().min(1).max(500).default(100),
+    },
+}, async ({ files, folder, outputFolder, recursive, text, logoFile, position, opacity, margin, watermarkWidth, limit }) => {
+    if (!apiKey)
+        throw new Error("CONVERTLY_API_KEY is required.");
+    const outputDir = resolveAllowed(outputFolder);
+    const inputs = await resolveMediaInputs(files, folder, recursive, limit, ["image", "video"]);
+    await mkdir(outputDir, { recursive: true });
+    const results = [];
+    for (const input of inputs) {
+        const s = await stat(input);
+        if (!s.isFile())
+            continue;
+        const entry = toEntry(input, s);
+        const form = new FormData();
+        const data = await readFile(input);
+        form.append("files", new Blob([data]), path.basename(input));
+        if (text)
+            form.append("text", text);
+        if (logoFile) {
+            const logoPath = resolveAllowed(logoFile);
+            const logoData = await readFile(logoPath);
+            form.append("watermarkFile", new Blob([logoData]), path.basename(logoPath));
+        }
+        form.append("position", position);
+        form.append("opacity", String(opacity));
+        form.append("margin", String(margin));
+        if (watermarkWidth)
+            form.append("watermarkWidth", String(watermarkWidth));
+        form.append("saveToStorage", "false");
+        const response = await fetch(`${baseUrl}/api/media/watermark`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${apiKey}` },
+            body: form,
+        });
+        const payload = await response.json();
+        if (!response.ok)
+            throw new Error(payload.error ?? `API returned ${response.status}`);
+        const url = payload.files?.[0]?.downloadUrl;
+        if (!url)
+            throw new Error("API did not return a watermarked file.");
+        const buffer = await downloadToBuffer(url);
+        const ext = entry.mediaKind === "video" ? ".mp4" : ".png";
+        const target = uniqueOutputPath(path.join(outputDir, `${path.basename(entry.name, entry.extension)}-watermarked${ext}`));
+        await writeFile(target, buffer);
+        results.push({ from: input, to: target, originalBytes: entry.sizeBytes, outputBytes: buffer.byteLength });
+    }
+    return jsonResult({ processedCount: results.length, results });
+});
+server.registerTool("create_storyboard", {
+    title: "Create Storyboard",
+    description: "Generate a storyboard grid image from local video files.",
+    inputSchema: {
+        files: z.array(z.string()).optional(),
+        folder: z.string().optional(),
+        outputFolder: z.string(),
+        recursive: z.boolean().default(false),
+        format: z.enum(["jpg", "png", "webp", "avif"]).default("jpg"),
+        frames: z.number().int().min(1).default(12),
+        columns: z.number().int().min(1).default(4),
+        width: z.number().int().min(1).default(240),
+        quality: z.number().int().min(1).max(100).default(86),
+        limit: z.number().int().min(1).max(500).default(100),
+    },
+}, async ({ files, folder, outputFolder, recursive, format, frames, columns, width, quality, limit }) => {
+    const result = await processMediaTool("/api/media/storyboard", {
+        files, folder, outputFolder, recursive, limit,
+        acceptKinds: ["video"],
+        params: { format, frames: String(frames), columns: String(columns), width: String(width), quality: String(quality) },
+        outputExt: (entry) => `.${format}`,
+    });
+    return jsonResult({ processedCount: result.processedCount, results: result.results });
+});
+server.registerTool("trim_media", {
+    title: "Trim Media",
+    description: "Trim local video and audio files to a specific start time and duration.",
+    inputSchema: {
+        files: z.array(z.string()).optional(),
+        folder: z.string().optional(),
+        outputFolder: z.string(),
+        recursive: z.boolean().default(false),
+        format: z.enum(["mp4", "webm", "mov", "mp3", "m4a", "wav"]).optional(),
+        start: z.number().min(0).default(0),
+        duration: z.number().min(0.1).default(10),
+        limit: z.number().int().min(1).max(500).default(100),
+    },
+}, async ({ files, folder, outputFolder, recursive, format, start, duration, limit }) => {
+    const result = await processMediaTool("/api/media/trim", {
+        files, folder, outputFolder, recursive, limit,
+        acceptKinds: ["video", "audio"],
+        params: { format: format ?? "", start: String(start), duration: String(duration) },
+    });
+    return jsonResult({ processedCount: result.processedCount, results: result.results });
+});
+server.registerTool("video_to_gif", {
+    title: "Video to GIF",
+    description: "Convert local video files to animated GIF previews.",
+    inputSchema: {
+        files: z.array(z.string()).optional(),
+        folder: z.string().optional(),
+        outputFolder: z.string(),
+        recursive: z.boolean().default(false),
+        start: z.number().min(0).default(0),
+        duration: z.number().min(0.1).default(4),
+        width: z.number().int().min(1).default(480),
+        fps: z.number().int().min(1).default(12),
+        limit: z.number().int().min(1).max(500).default(100),
+    },
+}, async ({ files, folder, outputFolder, recursive, start, duration, width, fps, limit }) => {
+    const result = await processMediaTool("/api/media/gif", {
+        files, folder, outputFolder, recursive, limit,
+        acceptKinds: ["video"],
+        params: { start: String(start), duration: String(duration), width: String(width), fps: String(fps) },
+        outputExt: () => ".gif",
+    });
+    return jsonResult({ processedCount: result.processedCount, results: result.results });
+});
+server.registerTool("pdf_preview", {
+    title: "PDF Preview",
+    description: "Convert pages from local PDF files to image previews.",
+    inputSchema: {
+        files: z.array(z.string()).optional(),
+        folder: z.string().optional(),
+        outputFolder: z.string(),
+        recursive: z.boolean().default(false),
+        format: z.enum(["jpg", "png", "webp", "avif"]).default("jpg"),
+        page: z.number().int().min(1).default(1),
+        width: z.number().int().min(1).default(1600),
+        quality: z.number().int().min(1).max(100).default(86),
+        limit: z.number().int().min(1).max(500).default(100),
+    },
+}, async ({ files, folder, outputFolder, recursive, format, page, width, quality, limit }) => {
+    const result = await processMediaTool("/api/media/pdf-preview", {
+        files, folder, outputFolder, recursive, limit,
+        acceptKinds: ["document"],
+        params: { format, page: String(page), width: String(width), quality: String(quality) },
+        outputExt: (entry) => `.${format}`,
+    });
+    return jsonResult({ processedCount: result.processedCount, results: result.results });
+});
+server.registerTool("poster_frame", {
+    title: "Poster Frame",
+    description: "Extract a poster frame image from local video files.",
+    inputSchema: {
+        files: z.array(z.string()).optional(),
+        folder: z.string().optional(),
+        outputFolder: z.string(),
+        recursive: z.boolean().default(false),
+        format: z.enum(["jpg", "png", "webp", "avif"]).default("jpg"),
+        timestamp: z.number().default(1),
+        width: z.number().int().min(1).default(1280),
+        quality: z.number().int().min(1).max(100).default(86),
+        limit: z.number().int().min(1).max(500).default(100),
+    },
+}, async ({ files, folder, outputFolder, recursive, format, timestamp, width, quality, limit }) => {
+    const result = await processMediaTool("/api/media/poster-frame", {
+        files, folder, outputFolder, recursive, limit,
+        acceptKinds: ["video"],
+        params: { format, timestamp: String(timestamp), width: String(width), quality: String(quality) },
+        outputExt: (entry) => `.${format}`,
+    });
+    return jsonResult({ processedCount: result.processedCount, results: result.results });
+});
+server.registerTool("extract_audio", {
+    title: "Extract Audio",
+    description: "Extract audio tracks from local video files.",
+    inputSchema: {
+        files: z.array(z.string()).optional(),
+        folder: z.string().optional(),
+        outputFolder: z.string(),
+        recursive: z.boolean().default(false),
+        format: z.enum(["mp3", "m4a", "wav", "ogg", "flac"]).default("mp3"),
+        bitrateKbps: z.number().int().min(32).default(192),
+        limit: z.number().int().min(1).max(500).default(100),
+    },
+}, async ({ files, folder, outputFolder, recursive, format, bitrateKbps, limit }) => {
+    const result = await processMediaTool("/api/media/extract-audio", {
+        files, folder, outputFolder, recursive, limit,
+        acceptKinds: ["video"],
+        params: { format, bitrateKbps: String(bitrateKbps) },
+        outputExt: () => `.${format}`,
+    });
+    return jsonResult({ processedCount: result.processedCount, results: result.results });
+});
+server.registerTool("strip_metadata", {
+    title: "Strip Metadata",
+    description: "Remove metadata from local media files.",
+    inputSchema: {
+        files: z.array(z.string()).optional(),
+        folder: z.string().optional(),
+        outputFolder: z.string(),
+        recursive: z.boolean().default(false),
+        limit: z.number().int().min(1).max(500).default(100),
+    },
+}, async ({ files, folder, outputFolder, recursive, limit }) => {
+    const result = await processMediaTool("/api/media/strip-metadata", {
+        files, folder, outputFolder, recursive, limit,
+        params: {},
+    });
+    return jsonResult({ processedCount: result.processedCount, results: result.results });
+});
+server.registerTool("images_to_pdf", {
+    title: "Images to PDF",
+    description: "Combine local images into a single PDF document.",
+    inputSchema: {
+        files: z.array(z.string()).min(1),
+        outputPath: z.string(),
+        pageSize: z.enum(["auto", "letter", "a4"]).default("auto"),
+    },
+}, async ({ files, outputPath, pageSize }) => {
+    if (!apiKey)
+        throw new Error("CONVERTLY_API_KEY is required.");
+    const output = resolveAllowed(outputPath);
+    await mkdir(path.dirname(output), { recursive: true });
+    const form = new FormData();
+    for (const file of files) {
+        const p = resolveAllowed(file);
+        const data = await readFile(p);
+        form.append("files", new Blob([data]), path.basename(p));
+    }
+    form.append("pageSize", pageSize);
+    form.append("saveToStorage", "false");
+    const response = await fetch(`${baseUrl}/api/media/image-to-pdf`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apiKey}` },
+        body: form,
+    });
+    const payload = await response.json();
+    if (!response.ok)
+        throw new Error(payload.error ?? `API returned ${response.status}`);
+    const url = payload.files?.[0]?.downloadUrl;
+    if (!url)
+        throw new Error("API did not return a PDF.");
+    const buffer = await downloadToBuffer(url);
+    await writeFile(output, buffer);
+    return jsonResult({ outputPath: output, pageCount: files.length, sizeBytes: buffer.byteLength });
+});
+server.registerTool("inspect_media", {
+    title: "Inspect Media",
+    description: "Return metadata and properties for local media files.",
+    inputSchema: {
+        files: z.array(z.string()).optional(),
+        folder: z.string().optional(),
+        recursive: z.boolean().default(false),
+        limit: z.number().int().min(1).max(500).default(100),
+    },
+}, async ({ files, folder, recursive, limit }) => {
+    if (!apiKey)
+        throw new Error("CONVERTLY_API_KEY is required.");
+    const inputs = await resolveMediaInputs(files, folder, recursive, limit);
+    const results = [];
+    for (const input of inputs) {
+        const s = await stat(input);
+        if (!s.isFile())
+            continue;
+        const { downloadUrl } = await postMediaFile("/api/media/inspect", input, {});
+        const buffer = await downloadToBuffer(downloadUrl);
+        const text = buffer.toString("utf-8");
+        const metadata = text ? JSON.parse(text) : {};
+        results.push({ file: input, metadata });
+    }
+    return jsonResult({ inspectedCount: results.length, results });
+});
+server.registerTool("adjust_media", {
+    title: "Adjust Media",
+    description: "Apply brightness, contrast, saturation, hue, grayscale, and other adjustments to images, video, and audio.",
+    inputSchema: {
+        files: z.array(z.string()).optional(),
+        folder: z.string().optional(),
+        outputFolder: z.string(),
+        recursive: z.boolean().default(false),
+        format: z.string().optional(),
+        quality: z.number().int().min(1).max(100).default(86),
+        brightness: z.number().default(1),
+        saturation: z.number().default(1),
+        hue: z.number().default(0),
+        contrast: z.number().default(1),
+        grayscale: z.boolean().default(false),
+        invert: z.boolean().default(false),
+        sharpen: z.boolean().default(false),
+        volume: z.number().default(1),
+        normalize: z.boolean().default(false),
+        fadeIn: z.number().min(0).default(0),
+        fadeOut: z.number().min(0).default(0),
+        limit: z.number().int().min(1).max(500).default(100),
+    },
+}, async ({ files, folder, outputFolder, recursive, format, quality, brightness, saturation, hue, contrast, grayscale, invert, sharpen, volume, normalize, fadeIn, fadeOut, limit }) => {
+    const result = await processMediaTool("/api/media/adjust", {
+        files, folder, outputFolder, recursive, limit,
+        params: {
+            format: format ?? "", quality: String(quality), brightness: String(brightness), saturation: String(saturation),
+            hue: String(hue), contrast: String(contrast), grayscale: String(grayscale), invert: String(invert),
+            sharpen: String(sharpen), volume: String(volume), normalize: String(normalize), fadeIn: String(fadeIn), fadeOut: String(fadeOut),
+        },
+    });
+    return jsonResult({ processedCount: result.processedCount, results: result.results });
+});
+/* ------------------------------------------------------------------ */
+/*  Transfer                                                            */
+/* ------------------------------------------------------------------ */
+server.registerTool("transfer_url", {
+    title: "Transfer URL",
+    description: "Download a public remote file URL and save it to an approved local folder.",
+    inputSchema: {
+        sourceUrl: z.string().url(),
+        outputPath: z.string(),
+        extract: z.boolean().default(false),
+    },
+}, async ({ sourceUrl, outputPath, extract }) => {
+    const output = resolveAllowed(outputPath);
+    await mkdir(path.dirname(output), { recursive: true });
+    const response = await fetch(sourceUrl, { redirect: "follow", headers: { "user-agent": "Convertly-MCP/1.0" } });
+    if (!response.ok)
+        throw new Error(`Source returned ${response.status}.`);
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (extract) {
+        if (!output.toLowerCase().endsWith(".zip"))
+            throw new Error("extract=true requires outputPath to end with .zip (archive will be extracted next to it).");
+        const tmpPath = output;
+        await writeFile(tmpPath, buffer);
+        const extractDir = output.replace(/\.zip$/i, "");
+        await mkdir(extractDir, { recursive: true });
+        // Extract using JSZip
+        const zip = await JSZip.loadAsync(buffer);
+        const extracted = [];
+        for (const [name, entry] of Object.entries(zip.files)) {
+            if (entry.dir || name.includes("__MACOSX/"))
+                continue;
+            const entryBuffer = await entry.async("nodebuffer");
+            const target = path.join(extractDir, name.replace(/\//g, path.sep));
+            await mkdir(path.dirname(target), { recursive: true });
+            await writeFile(target, entryBuffer);
+            extracted.push(target);
+        }
+        await rm(tmpPath);
+        return jsonResult({ sourceUrl, extractedTo: extractDir, extractedCount: extracted.length, files: extracted });
+    }
+    await writeFile(output, buffer);
+    return jsonResult({ sourceUrl, outputPath: output, sizeBytes: buffer.byteLength });
+});
+/* ------------------------------------------------------------------ */
+/*  Currency                                                            */
+/* ------------------------------------------------------------------ */
+server.registerTool("convert_currency", {
+    title: "Convert Currency",
+    description: "Convert an amount from one currency to another using Convertly exchange rates.",
+    inputSchema: {
+        amount: z.union([z.string(), z.number()]),
+        from: z.string().length(3).toUpperCase(),
+        to: z.string().length(3).toUpperCase(),
+        precision: z.number().int().min(0).max(12).default(6),
+    },
+}, async ({ amount, from, to, precision }) => {
+    const data = await apiFetch("/api/currency/convert", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ amount: String(amount), from, to, precision }),
+    });
+    return jsonResult(data);
+});
+/* ------------------------------------------------------------------ */
+/*  Async jobs                                                          */
+/* ------------------------------------------------------------------ */
+server.registerTool("list_jobs", {
+    title: "List Async Jobs",
+    description: "List recent async conversion and media-tool jobs from your Convertly account.",
+    inputSchema: { limit: z.number().int().min(1).max(100).default(20), offset: z.number().int().min(0).default(0), status: z.string().optional() },
+}, async ({ limit, offset, status }) => {
+    const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+    if (status)
+        params.set("status", status);
+    const data = await apiFetch(`/api/jobs?${params.toString()}`);
+    return jsonResult(data);
+});
+server.registerTool("get_job", {
+    title: "Get Job Status",
+    description: "Get the status and results of a specific async job by ID.",
+    inputSchema: { jobId: z.string().uuid() },
+}, async ({ jobId }) => {
+    const data = await apiFetch(`/api/jobs/${jobId}`);
+    return jsonResult(data);
+});
+/* ------------------------------------------------------------------ */
+/*  Cloud storage                                                       */
+/* ------------------------------------------------------------------ */
+server.registerTool("list_cloud_files", {
+    title: "List Cloud Files",
+    description: "List files stored in your Convertly cloud storage.",
+    inputSchema: { folderId: z.string().uuid().optional(), limit: z.number().int().min(1).max(200).default(50) },
+}, async ({ folderId, limit }) => {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (folderId)
+        params.set("folderId", folderId);
+    const data = await apiFetch(`/api/files?${params.toString()}`);
+    return jsonResult(data);
+});
+server.registerTool("delete_cloud_file", {
+    title: "Delete Cloud File",
+    description: "Delete a file from your Convertly cloud storage.",
+    inputSchema: { fileId: z.string().uuid(), confirm: z.boolean().default(false) },
+}, async ({ fileId, confirm }) => {
+    if (!confirm)
+        return jsonResult({ dryRun: true, wouldDelete: fileId, note: "Call again with confirm=true to delete." });
+    const data = await apiFetch(`/api/files/${fileId}`, { method: "DELETE" });
+    return jsonResult({ deleted: true, fileId, ...data });
+});
+server.registerTool("list_folders", {
+    title: "List Folders",
+    description: "List folders in your Convertly cloud storage.",
+    inputSchema: { parentId: z.string().uuid().optional() },
+}, async ({ parentId }) => {
+    const params = new URLSearchParams();
+    if (parentId)
+        params.set("parentId", parentId);
+    const data = await apiFetch(`/api/folders${params.toString() ? `?${params.toString()}` : ""}`);
+    return jsonResult(data);
+});
+/* ------------------------------------------------------------------ */
+/*  Main                                                                */
+/* ------------------------------------------------------------------ */
+async function main() {
+    await server.connect(new StdioServerTransport());
+}
+main().catch((error) => {
+    console.error(error);
+    process.exit(1);
+});
+/* ------------------------------------------------------------------ */
+/*  Docs helpers                                                        */
+/* ------------------------------------------------------------------ */
 function createDocsIndex(origin) {
     const page = (slug, title, description, keywords = []) => ({
-        slug,
-        title,
-        url: `${origin}/${slug}`,
-        description,
-        keywords,
+        slug, title, url: `${origin}/${slug}`, description, keywords,
     });
     return [
         page("", "Overview", "Start here for Convertly concepts, authentication, and the main API surfaces.", ["quickstart", "overview", "start"]),
@@ -546,21 +960,9 @@ function resolveDoc(slugOrUrl) {
     if (existing)
         return existing;
     if (/^https?:\/\//i.test(value)) {
-        return {
-            slug: value,
-            title: value,
-            url: value,
-            description: "Custom Convertly documentation URL.",
-            keywords: [],
-        };
+        return { slug: value, title: value, url: value, description: "Custom Convertly documentation URL.", keywords: [] };
     }
-    return {
-        slug: normalized,
-        title: normalized || "Overview",
-        url: `${docsBaseUrl}/${normalized}`,
-        description: "Convertly documentation page.",
-        keywords: [],
-    };
+    return { slug: normalized, title: normalized || "Overview", url: `${docsBaseUrl}/${normalized}`, description: "Convertly documentation page.", keywords: [] };
 }
 function readableText(raw) {
     return raw
@@ -575,14 +977,4 @@ function readableText(raw) {
         .replace(/&#39;/g, "'")
         .replace(/\s+/g, " ")
         .trim();
-}
-function jsonResult(value) {
-    return {
-        content: [
-            {
-                type: "text",
-                text: JSON.stringify(value, null, 2),
-            },
-        ],
-    };
 }
