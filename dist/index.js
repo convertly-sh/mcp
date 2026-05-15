@@ -1001,6 +1001,27 @@ server.registerTool("download_cloud_file", {
     });
     return jsonResult(data);
 });
+server.registerTool("save_cloud_file", {
+    title: "Save Cloud File to Local",
+    description: "Download a file from Convertly cloud storage directly to an approved local folder. One-step cloud to local.",
+    inputSchema: { fileId: z.string().uuid(), outputPath: z.string() },
+}, async ({ fileId, outputPath }) => {
+    assertLocalMode();
+    const out = resolveAllowed(outputPath);
+    const meta = await apiFetch(`/api/files/${fileId}`, {
+        headers: { Accept: "application/json" },
+    });
+    const downloadUrl = meta.file?.downloadUrl;
+    if (!downloadUrl)
+        throw new Error("No download URL returned from cloud storage.");
+    const response = await fetch(downloadUrl, { redirect: "follow", headers: { "user-agent": "Convertly-MCP/1.0" } });
+    if (!response.ok)
+        throw new Error(`Download failed: ${response.status}`);
+    const buffer = Buffer.from(await response.arrayBuffer());
+    await mkdir(path.dirname(out), { recursive: true });
+    await writeFile(out, buffer);
+    return jsonResult({ saved: true, fileId, outputPath: out, bytes: buffer.length, filename: meta.file?.filename });
+});
 server.registerTool("rename_cloud_file", {
     title: "Rename Cloud File",
     description: "Rename a file in your Convertly cloud storage.",
