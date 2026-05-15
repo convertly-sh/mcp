@@ -121,6 +121,7 @@ Related issues: [anthropics/claude-code#34359](https://github.com/anthropics/cla
 - `scan_folder` — list files with size, modified date, and media category
 - `plan_organize_folder` — dry-run moves into Images, Videos, Audio, Archives, Documents, and Other
 - `move_files` — move files inside approved roots after `confirm: true`
+- `rename_files` — rename files inside approved roots after `confirm: true`
 - `create_archive` — create ZIP archives inside approved roots
 - `delete_files` — delete files only when `confirm` is `true`
 
@@ -155,7 +156,9 @@ Related issues: [anthropics/claude-code#34359](https://github.com/anthropics/cla
 ### Cloud Storage
 - `list_cloud_files` — list files in Convertly cloud storage
 - `delete_cloud_file` — delete a file from cloud storage
+- `rename_cloud_file` — rename a file in cloud storage
 - `list_folders` — list folders in cloud storage
+- `rename_folder` — rename a folder in cloud storage
 
 ## Safety
 

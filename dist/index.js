@@ -275,6 +275,27 @@ server.registerTool("move_files", {
     }
     return jsonResult({ movedCount: moved.length, moved });
 });
+server.registerTool("rename_files", {
+    title: "Rename Files",
+    description: "Rename approved files. Requires confirm=true. Works on individual files within approved roots.",
+    inputSchema: { renames: z.array(z.object({ from: z.string(), to: z.string() })).min(1), confirm: z.boolean().default(false), overwrite: z.boolean().default(false) },
+}, async ({ renames, confirm, overwrite }) => {
+    assertLocalMode();
+    const resolved = renames.map((r) => ({ from: resolveAllowed(r.from), to: resolveAllowed(r.to) }));
+    if (!confirm)
+        return jsonResult({ dryRun: true, wouldRename: resolved, note: "Call again with confirm=true to rename files." });
+    const renamed = [];
+    for (const r of resolved) {
+        const sourceStat = await stat(r.from);
+        if (!sourceStat.isFile())
+            throw new Error(`Refusing to rename non-file path: ${r.from}`);
+        if (!overwrite && await exists(r.to))
+            throw new Error(`Destination already exists: ${r.to}`);
+        await rename(r.from, r.to);
+        renamed.push(r);
+    }
+    return jsonResult({ renamedCount: renamed.length, renamed });
+});
 server.registerTool("create_archive", {
     title: "Create ZIP Archive",
     description: "Create a ZIP archive from approved files or all files in an approved folder. Does not delete originals.",
@@ -907,6 +928,34 @@ server.registerTool("list_folders", {
         params.set("parentId", parentId);
     const data = await apiFetch(`/api/folders${params.toString() ? `?${params.toString()}` : ""}`);
     return jsonResult(data);
+});
+server.registerTool("rename_cloud_file", {
+    title: "Rename Cloud File",
+    description: "Rename a file in your Convertly cloud storage.",
+    inputSchema: { fileId: z.string().uuid(), name: z.string().min(1), confirm: z.boolean().default(false) },
+}, async ({ fileId, name, confirm }) => {
+    if (!confirm)
+        return jsonResult({ dryRun: true, wouldRename: { fileId, name }, note: "Call again with confirm=true to rename." });
+    const data = await apiFetch(`/api/files/${fileId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: name }),
+    });
+    return jsonResult({ renamed: true, fileId, ...data });
+});
+server.registerTool("rename_folder", {
+    title: "Rename Folder",
+    description: "Rename a folder in your Convertly cloud storage.",
+    inputSchema: { folderId: z.string().uuid(), name: z.string().min(1), confirm: z.boolean().default(false) },
+}, async ({ folderId, name, confirm }) => {
+    if (!confirm)
+        return jsonResult({ dryRun: true, wouldRename: { folderId, name }, note: "Call again with confirm=true to rename." });
+    const data = await apiFetch(`/api/folders/${folderId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+    });
+    return jsonResult({ renamed: true, folderId, ...data });
 });
 /* ------------------------------------------------------------------ */
 /*  Main                                                                */
