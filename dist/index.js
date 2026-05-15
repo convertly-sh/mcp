@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createReadStream } from "node:fs";
-import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -295,6 +295,56 @@ server.registerTool("rename_files", {
         renamed.push(r);
     }
     return jsonResult({ renamedCount: renamed.length, renamed });
+});
+server.registerTool("copy_files", {
+    title: "Copy Files",
+    description: "Copy approved files to approved destinations. Requires confirm=true and creates destination folders.",
+    inputSchema: { copies: z.array(z.object({ from: z.string(), to: z.string() })).min(1), confirm: z.boolean().default(false), overwrite: z.boolean().default(false) },
+}, async ({ copies, confirm, overwrite }) => {
+    assertLocalMode();
+    const resolved = copies.map((c) => ({ from: resolveAllowed(c.from), to: resolveAllowed(c.to) }));
+    if (!confirm)
+        return jsonResult({ dryRun: true, wouldCopy: resolved, note: "Call again with confirm=true to copy files." });
+    const copied = [];
+    for (const c of resolved) {
+        const sourceStat = await stat(c.from);
+        if (!sourceStat.isFile())
+            throw new Error(`Refusing to copy non-file path: ${c.from}`);
+        if (!overwrite && await exists(c.to))
+            throw new Error(`Destination already exists: ${c.to}`);
+        await mkdir(path.dirname(c.to), { recursive: true });
+        await copyFile(c.from, c.to);
+        copied.push(c);
+    }
+    return jsonResult({ copiedCount: copied.length, copied });
+});
+server.registerTool("create_folder", {
+    title: "Create Folder",
+    description: "Create a folder inside approved roots. Creates parent directories as needed.",
+    inputSchema: { path: z.string(), recursive: z.boolean().default(true) },
+}, async ({ path: folderPath, recursive }) => {
+    assertLocalMode();
+    const resolved = resolveAllowed(folderPath);
+    await mkdir(resolved, { recursive });
+    return jsonResult({ created: resolved });
+});
+server.registerTool("read_file", {
+    title: "Read File",
+    description: "Read the contents of an approved text file. Returns UTF-8 text. Binary files may return garbled text.",
+    inputSchema: { path: z.string(), limitBytes: z.number().int().min(1).max(1048576).default(262144) },
+}, async ({ path: filePath, limitBytes }) => {
+    assertLocalMode();
+    const resolved = resolveAllowed(filePath);
+    const s = await stat(resolved);
+    if (!s.isFile())
+        throw new Error(`Not a file: ${filePath}`);
+    if (s.size > limitBytes) {
+        const fd = await readFile(resolved);
+        const truncated = fd.toString("utf-8", 0, limitBytes);
+        return jsonResult({ path: resolved, sizeBytes: s.size, truncated: true, limitBytes, text: truncated });
+    }
+    const text = await readFile(resolved, "utf-8");
+    return jsonResult({ path: resolved, sizeBytes: s.size, truncated: false, text });
 });
 server.registerTool("create_archive", {
     title: "Create ZIP Archive",
@@ -927,6 +977,18 @@ server.registerTool("list_folders", {
     if (parentId)
         params.set("parentId", parentId);
     const data = await apiFetch(`/api/folders${params.toString() ? `?${params.toString()}` : ""}`);
+    return jsonResult(data);
+});
+server.registerTool("create_cloud_folder", {
+    title: "Create Cloud Folder",
+    description: "Create a folder in your Convertly cloud storage.",
+    inputSchema: { name: z.string().min(1), parentId: z.string().uuid().optional(), color: z.string().optional() },
+}, async ({ name, parentId, color }) => {
+    const data = await apiFetch("/api/folders", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, parentId, color }),
+    });
     return jsonResult(data);
 });
 server.registerTool("rename_cloud_file", {

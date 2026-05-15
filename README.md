@@ -97,6 +97,9 @@ On Windows, separate approved roots with `;`:
 - `plan_organize_folder` — dry-run moves into Images, Videos, Audio, Archives, Documents, and Other
 - `move_files` — move files inside approved roots after `confirm: true`
 - `rename_files` — rename files inside approved roots after `confirm: true`
+- `copy_files` — copy files inside approved roots after `confirm: true`
+- `create_folder` — create folders inside approved roots
+- `read_file` — read text contents of approved files
 - `create_archive` — create ZIP archives inside approved roots
 - `delete_files` — delete files only when `confirm` is `true`
 
@@ -133,6 +136,7 @@ On Windows, separate approved roots with `;`:
 - `delete_cloud_file` — delete a file from cloud storage
 - `rename_cloud_file` — rename a file in cloud storage
 - `list_folders` — list folders in cloud storage
+- `create_cloud_folder` — create a folder in cloud storage
 - `rename_folder` — rename a folder in cloud storage
 
 ## Safety
