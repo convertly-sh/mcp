@@ -1,8 +1,41 @@
 # Convertly MCP
 
-Convertly MCP is a local Model Context Protocol server for AI agents that need to work with approved folders and Convertly media APIs.
+Convertly MCP is a Model Context Protocol server for AI agents that need to work with Convertly media APIs.
 
 Use it from Claude, ChatGPT, Cursor, or another MCP-compatible client to organize files, convert media, remove backgrounds, vectorize, watermark, trim video, generate thumbnails, create GIFs, compress images, extract audio, inspect metadata, convert currencies, manage cloud storage, and more.
+
+## Modes
+
+### Local mode (stdio) — recommended
+
+Runs on your machine with access to local files. The AI agent can read and write approved folders.
+
+```json
+{
+  "mcpServers": {
+    "convertly": {
+      "command": "npx",
+      "args": ["-y", "@convertly/mcp"],
+      "env": {
+        "CONVERTLY_API_KEY": "ctly_live_...",
+        "CONVERTLY_MCP_ROOTS": "/Users/you/Downloads:/Users/you/Pictures"
+      }
+    }
+  }
+}
+```
+
+### Remote mode (HTTP/SSE)
+
+Runs as an HTTP server. The AI agent can use all API-based tools but cannot access your local filesystem.
+
+```bash
+CONVERTLY_API_KEY=ctly_live_... CONVERTLY_MCP_HTTP_PORT=3000 npx @convertly/mcp
+```
+
+Then connect to `http://localhost:3000/mcp`.
+
+**Note:** Filesystem tools (`scan_folder`, `move_files`, `create_archive`, `delete_files`, `transfer_url`, `list_roots`, `plan_organize_folder`) return an error in HTTP mode because the server cannot access your local computer. All media processing, docs, jobs, currency, and cloud storage tools still work.
 
 ## Install
 
@@ -49,7 +82,7 @@ On Windows, separate approved roots with `;`:
 - `search_convertly_docs` — search Convertly docs by topic
 - `get_convertly_doc` — fetch readable text for a Convertly docs page
 
-### Filesystem
+### Filesystem (local mode only)
 - `list_roots` — show approved folders
 - `scan_folder` — list files with size, modified date, and media category
 - `plan_organize_folder` — dry-run moves into Images, Videos, Audio, Archives, Documents, and Other
@@ -78,7 +111,7 @@ On Windows, separate approved roots with `;`:
 - `adjust_media` — apply brightness, contrast, saturation, hue, grayscale, and other adjustments
 
 ### Transfer & Utilities
-- `transfer_url` — download public remote URLs to approved local folders
+- `transfer_url` — download public remote URLs to approved local folders (local mode only)
 - `convert_currency` — convert currencies using Convertly exchange rates
 
 ### Async Jobs

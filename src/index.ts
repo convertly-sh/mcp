@@ -5,6 +5,7 @@ import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/p
 import { homedir } from "node:os";
 import path from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import JSZip from "jszip";
 import { z } from "zod";
@@ -38,10 +39,16 @@ const baseUrl = (process.env.CONVERTLY_BASE_URL ?? "https://convertly.sh").repla
 const docsBaseUrl = "https://docs.convertly.sh";
 const convertlyDocs = createDocsIndex(docsBaseUrl);
 
+const isHttpMode = !!process.env.CONVERTLY_MCP_HTTP_PORT;
+
 const server = new McpServer({
-  name: "convertly-local",
+  name: isHttpMode ? "convertly-remote" : "convertly-local",
   version: "0.2.0",
 });
+
+function assertLocalMode() {
+  if (isHttpMode) throw new Error("This tool requires the local stdio MCP server. It cannot access your computer's filesystem over HTTP. Run the server locally to use filesystem tools.");
+}
 
 /* ------------------------------------------------------------------ */
 /*  Shared helpers                                                      */
@@ -278,7 +285,10 @@ server.registerTool(
 server.registerTool(
   "list_roots",
   { title: "List Approved Roots", description: "List folders this Convertly MCP server is allowed to read and write." },
-  async () => jsonResult({ roots }),
+  async () => {
+    assertLocalMode();
+    return jsonResult({ roots });
+  },
 );
 
 server.registerTool(
@@ -289,6 +299,7 @@ server.registerTool(
     inputSchema: { folder: z.string(), recursive: z.boolean().default(false), limit: z.number().int().min(1).max(2000).default(300) },
   },
   async ({ folder, recursive, limit }) => {
+    assertLocalMode();
     const root = resolveAllowed(folder);
     const files = await scanFolder(root, recursive, limit);
     return jsonResult({ folder: root, count: files.length, files });
@@ -303,6 +314,7 @@ server.registerTool(
     inputSchema: { folder: z.string(), recursive: z.boolean().default(false), olderThanDays: z.number().int().min(0).optional(), limit: z.number().int().min(1).max(2000).default(500) },
   },
   async ({ folder, recursive, olderThanDays, limit }) => {
+    assertLocalMode();
     const root = resolveAllowed(folder);
     const files = await scanFolder(root, recursive, limit);
     const cutoff = olderThanDays ? Date.now() - olderThanDays * 24 * 60 * 60 * 1000 : null;
@@ -322,6 +334,7 @@ server.registerTool(
     inputSchema: { moves: z.array(z.object({ from: z.string(), to: z.string() })).min(1), confirm: z.boolean().default(false), overwrite: z.boolean().default(false) },
   },
   async ({ moves, confirm, overwrite }) => {
+    assertLocalMode();
     const resolved = moves.map((move) => ({ from: resolveAllowed(move.from), to: resolveAllowed(move.to) }));
     if (!confirm) return jsonResult({ dryRun: true, wouldMove: resolved, note: "Call again with confirm=true to move files." });
     const moved: Array<{ from: string; to: string }> = [];
@@ -353,6 +366,7 @@ server.registerTool(
     },
   },
   async ({ outputPath, files, folder, recursive, olderThanDays, includeMediaOnly, limit }) => {
+    assertLocalMode();
     const output = resolveAllowed(outputPath);
     if (!output.toLowerCase().endsWith(".zip")) throw new Error("outputPath must end with .zip");
     const inputs = files?.length
@@ -393,6 +407,7 @@ server.registerTool(
     inputSchema: { files: z.array(z.string()).min(1), confirm: z.boolean().default(false) },
   },
   async ({ files, confirm }) => {
+    assertLocalMode();
     const targets = files.map((item) => resolveAllowed(item));
     if (!confirm) return jsonResult({ dryRun: true, wouldDelete: targets, note: "Call again with confirm=true to delete." });
     for (const target of targets) {
@@ -944,6 +959,7 @@ server.registerTool(
     },
   },
   async ({ sourceUrl, outputPath, extract }) => {
+    assertLocalMode();
     const output = resolveAllowed(outputPath);
     await mkdir(path.dirname(output), { recursive: true });
 
@@ -1088,7 +1104,59 @@ server.registerTool(
 /* ------------------------------------------------------------------ */
 
 async function main() {
-  await server.connect(new StdioServerTransport());
+  const httpPort = process.env.CONVERTLY_MCP_HTTP_PORT;
+
+  if (httpPort) {
+    const port = Number(httpPort);
+    const { createServer } = await import("node:http");
+    const transports: Record<string, SSEServerTransport> = {};
+
+    const httpServer = createServer(async (req, res) => {
+      const url = new URL(req.url || "/", `http://${req.headers.host}`);
+
+      if (req.method === "GET" && url.pathname === "/mcp") {
+        try {
+          const transport = new SSEServerTransport("/messages", res);
+          const sessionId = transport.sessionId;
+          transports[sessionId] = transport;
+          transport.onclose = () => { delete transports[sessionId]; };
+          await server.connect(transport);
+        } catch (error) {
+          console.error("SSE connection error:", error);
+          if (!res.headersSent) res.writeHead(500).end("SSE error");
+        }
+        return;
+      }
+
+      if (req.method === "POST" && url.pathname === "/messages") {
+        const sessionId = url.searchParams.get("sessionId");
+        if (!sessionId) {
+          res.writeHead(400).end("Missing sessionId");
+          return;
+        }
+        const transport = transports[sessionId];
+        if (!transport) {
+          res.writeHead(404).end("Session not found");
+          return;
+        }
+        try {
+          await transport.handlePostMessage(req, res);
+        } catch (error) {
+          console.error("Message handling error:", error);
+          if (!res.headersSent) res.writeHead(500).end("Message error");
+        }
+        return;
+      }
+
+      res.writeHead(404).end("Not found");
+    });
+
+    httpServer.listen(port, () => {
+      console.log(`Convertly MCP HTTP server listening on http://localhost:${port}/mcp`);
+    });
+  } else {
+    await server.connect(new StdioServerTransport());
+  }
 }
 
 main().catch((error) => {
