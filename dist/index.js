@@ -1174,7 +1174,7 @@ function createDocsIndex(origin) {
         page("authentication", "Authentication", "Use Convertly API keys with Bearer auth or x-api-key headers.", ["api key", "auth", "security"]),
         page("docs/sdk", "SDK", "Use the Convertly JavaScript SDK for conversion, compression, jobs, storage, and transfer workflows.", ["javascript", "typescript", "sdk"]),
         page("docs/php-sdk", "PHP SDK", "Use Convertly from PHP applications.", ["php", "sdk"]),
-        page("docs/mcp-agents", "MCP for AI Agents", "Connect Convertly tools and approved local folders to MCP-compatible AI clients.", ["mcp", "claude", "chatgpt", "cursor", "agents"]),
+        page("docs/mcp-agents", "MCP for AI Agents", "Connect Convertly tools and approved local folders to MCP-compatible AI clients.", ["mcp", "claude", "codex", "cursor", "agents"]),
         page("docs/wordpress-plugin", "WordPress Plugin", "Optimize WordPress media with Convertly.", ["wordpress", "plugin", "media library"]),
         page("docs/media-conversion", "Media Conversion", "Convert images, video, audio, documents, and archives through the Convertly API.", ["convert", "formats", "image", "video", "audio"]),
         page("docs/media-tools", "Media Tools", "Use thumbnails, watermarks, PDF previews, metadata tools, trimming, GIFs, and storyboards.", ["thumbnail", "watermark", "pdf", "metadata", "trim"]),
