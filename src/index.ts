@@ -2,6 +2,8 @@
 
 import { createReadStream, type Stats } from "node:fs";
 import { copyFile, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -10,7 +12,10 @@ import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import JSZip from "jszip";
 import * as tar from "tar";
+import { path7za } from "7zip-bin";
 import { z } from "zod";
+
+const execFileAsync = promisify(execFile);
 
 type FileEntry = {
   path: string;
@@ -440,7 +445,7 @@ server.registerTool(
   "create_archive",
   {
     title: "Create Archive",
-    description: "Create an archive from approved files or all files in an approved folder. Supports ZIP, TAR, TGZ, 7Z, RAR, GZ, BZ2, and XZ. Format is auto-detected from the output path extension.",
+    description: "Create a ZIP, TAR, TGZ, or 7Z archive from approved files or all files in an approved folder. Does not delete originals. Format is auto-detected from the output path extension.",
     inputSchema: {
       outputPath: z.string(),
       files: z.array(z.string()).optional(),
@@ -449,7 +454,7 @@ server.registerTool(
       olderThanDays: z.number().int().min(0).optional(),
       includeMediaOnly: z.boolean().default(false),
       limit: z.number().int().min(1).max(5000).default(1000),
-      format: z.enum(["zip", "tar", "tgz", "7z", "rar", "gz", "bz2", "xz"]).optional(),
+      format: z.enum(["zip", "tar", "tgz", "7z"]).optional(),
     },
   },
   async ({ outputPath, files, folder, recursive, olderThanDays, includeMediaOnly, limit, format }) => {
@@ -462,14 +467,10 @@ server.registerTool(
       ext === ".tar" ? "tar" :
       ext === ".tgz" ? "tgz" :
       ext === ".7z" ? "7z" :
-      ext === ".rar" ? "rar" :
-      ext === ".gz" ? "gz" :
-      ext === ".bz2" ? "bz2" :
-      ext === ".xz" ? "xz" :
       null
     );
     if (!detectedFormat) {
-      throw new Error(`Unsupported archive format: ${ext || "(none)"}. Supported: .zip, .tar, .tgz, .7z, .rar, .gz, .bz2, .xz`);
+      throw new Error(`Unsupported archive format: ${ext || "(none)"}. Supported: .zip, .tar, .tgz, .7z`);
     }
 
     const resolvedFolder = folder ? resolveAllowed(folder) : null;
@@ -527,49 +528,23 @@ server.registerTool(
       }
     }
 
-    // For 7z, rar, gz, bz2, xz: bundle into a temp ZIP locally, then use the
-    // Convertly API to convert the ZIP to the target archive format.
-    if (!apiKey) throw new Error(`CONVERTLY_API_KEY is required to create ${detectedFormat.toUpperCase()} archives.`);
-
-    const tmpZip = path.join(tmpdir(), `convertly-archive-${randomUUID()}.zip`);
+    // 7Z via bundled 7-Zip binary
+    const workspace = path.join(tmpdir(), `convertly-archive-${randomUUID()}`);
+    await mkdir(workspace, { recursive: true });
     try {
-      const zip = new JSZip();
       for (const file of selected) {
         const archivePath = resolvedFolder
-          ? path.relative(resolvedFolder, file.path).replace(/\\/g, "/")
+          ? path.relative(resolvedFolder, file.path)
           : file.name;
-        zip.file(archivePath, createReadStream(file.path));
+        const dest = path.join(workspace, archivePath);
+        await mkdir(path.dirname(dest), { recursive: true });
+        await copyFile(file.path, dest);
       }
-      const zipBuffer = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE", compressionOptions: { level: 6 } });
-      if (zipBuffer.byteLength > 50 * 1024 * 1024) {
-        throw new Error(`Archive contents exceed 50 MB — the Convertly API synchronous limit. Use .zip or .tar locally, or reduce the file set.`);
-      }
-      await writeFile(tmpZip, zipBuffer);
-
-      const form = new FormData();
-      form.append("files", new Blob([new Uint8Array(zipBuffer)]), "archive.zip");
-      form.append("format", detectedFormat);
-      form.append("saveToStorage", "false");
-
-      const response = await fetch(`${baseUrl}/api/convert`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${apiKey}` },
-        body: form,
-      });
-
-      const payload = await response.json() as {
-        files?: Array<{ downloadUrl?: string; filename?: string }>;
-        error?: string;
-      };
-      if (!response.ok) throw new Error(payload.error ?? `API returned ${response.status}`);
-      const first = payload.files?.[0];
-      if (!first?.downloadUrl) throw new Error("API did not return a processed archive.");
-
-      const archiveBuffer = await downloadToBuffer(first.downloadUrl);
-      await writeFile(output, archiveBuffer);
-      return jsonResult({ outputPath: output, format: detectedFormat, archivedCount: selected.length, sizeBytes: archiveBuffer.byteLength });
+      await execFileAsync(path7za, ["a", output, "."], { cwd: workspace });
+      const stats = await stat(output);
+      return jsonResult({ outputPath: output, format: "7z", archivedCount: selected.length, sizeBytes: stats.size });
     } finally {
-      await rm(tmpZip, { force: true });
+      await rm(workspace, { recursive: true, force: true });
     }
   },
 );
