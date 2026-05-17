@@ -2,12 +2,14 @@
 
 import { createReadStream, type Stats } from "node:fs";
 import { copyFile, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import JSZip from "jszip";
+import * as tar from "tar";
 import { z } from "zod";
 
 type FileEntry = {
@@ -437,8 +439,8 @@ server.registerTool(
 server.registerTool(
   "create_archive",
   {
-    title: "Create ZIP Archive",
-    description: "Create a ZIP archive from approved files or all files in an approved folder. Does not delete originals.",
+    title: "Create Archive",
+    description: "Create a ZIP, TAR, or TGZ archive from approved files or all files in an approved folder. Does not delete originals. Format is auto-detected from the output path extension (.zip, .tar, .tgz).",
     inputSchema: {
       outputPath: z.string(),
       files: z.array(z.string()).optional(),
@@ -447,16 +449,29 @@ server.registerTool(
       olderThanDays: z.number().int().min(0).optional(),
       includeMediaOnly: z.boolean().default(false),
       limit: z.number().int().min(1).max(5000).default(1000),
+      format: z.enum(["zip", "tar", "tgz"]).optional(),
     },
   },
-  async ({ outputPath, files, folder, recursive, olderThanDays, includeMediaOnly, limit }) => {
+  async ({ outputPath, files, folder, recursive, olderThanDays, includeMediaOnly, limit, format }) => {
     assertLocalMode();
     const output = resolveAllowed(outputPath);
-    if (!output.toLowerCase().endsWith(".zip")) throw new Error("outputPath must end with .zip");
+
+    const ext = path.extname(output).toLowerCase();
+    const detectedFormat = format ?? (
+      ext === ".zip" ? "zip" :
+      ext === ".tar" ? "tar" :
+      ext === ".tgz" ? "tgz" :
+      null
+    );
+    if (!detectedFormat) {
+      throw new Error(`Unsupported archive format: ${ext || "(none)"}. Supported: .zip, .tar, .tgz`);
+    }
+
+    const resolvedFolder = folder ? resolveAllowed(folder) : null;
     const inputs = files?.length
       ? files.map((item) => resolveAllowed(item))
-      : folder
-        ? (await scanFolder(resolveAllowed(folder), recursive, limit)).map((item) => item.path)
+      : resolvedFolder
+        ? (await scanFolder(resolvedFolder, recursive, limit)).map((item) => item.path)
         : [];
     if (!inputs.length) throw new Error("Provide files or folder.");
 
@@ -472,14 +487,39 @@ server.registerTool(
       if (selected.length >= limit) break;
     }
 
-    const zip = new JSZip();
-    for (const file of selected) {
-      zip.file(file.name, createReadStream(file.path));
-    }
     await mkdir(path.dirname(output), { recursive: true });
-    const buffer = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE", compressionOptions: { level: 6 } });
-    await writeFile(output, buffer);
-    return jsonResult({ outputPath: output, archivedCount: selected.length, sizeBytes: buffer.byteLength });
+
+    if (detectedFormat === "zip") {
+      const zip = new JSZip();
+      for (const file of selected) {
+        const archivePath = resolvedFolder
+          ? path.relative(resolvedFolder, file.path).replace(/\\/g, "/")
+          : file.name;
+        zip.file(archivePath, createReadStream(file.path));
+      }
+      const buffer = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE", compressionOptions: { level: 6 } });
+      await writeFile(output, buffer);
+      return jsonResult({ outputPath: output, format: "zip", archivedCount: selected.length, sizeBytes: buffer.byteLength });
+    }
+
+    // tar / tgz via temp workspace
+    const workspace = path.join(tmpdir(), `convertly-archive-${randomUUID()}`);
+    await mkdir(workspace, { recursive: true });
+    try {
+      for (const file of selected) {
+        const archivePath = resolvedFolder
+          ? path.relative(resolvedFolder, file.path)
+          : file.name;
+        const dest = path.join(workspace, archivePath);
+        await mkdir(path.dirname(dest), { recursive: true });
+        await copyFile(file.path, dest);
+      }
+      await tar.create({ cwd: workspace, file: output, gzip: detectedFormat === "tgz" }, ["."]);
+      const stats = await stat(output);
+      return jsonResult({ outputPath: output, format: detectedFormat, archivedCount: selected.length, sizeBytes: stats.size });
+    } finally {
+      await rm(workspace, { recursive: true, force: true });
+    }
   },
 );
 
@@ -1035,7 +1075,7 @@ server.registerTool(
   "transfer_url",
   {
     title: "Transfer URL",
-    description: "Download a public remote file URL and save it to an approved local folder.",
+    description: "Download a public remote file URL and save it to an approved local folder. Supports ZIP and TGZ extraction.",
     inputSchema: {
       sourceUrl: z.string().url(),
       outputPath: z.string(),
@@ -1052,22 +1092,45 @@ server.registerTool(
     const buffer = Buffer.from(await response.arrayBuffer());
 
     if (extract) {
-      if (!output.toLowerCase().endsWith(".zip")) throw new Error("extract=true requires outputPath to end with .zip (archive will be extracted next to it).");
+      const isZip = output.toLowerCase().endsWith(".zip");
+      const isTgz = output.toLowerCase().endsWith(".tgz") || output.toLowerCase().endsWith(".tar.gz");
+      if (!isZip && !isTgz) throw new Error("extract=true requires outputPath to end with .zip or .tgz (archive will be extracted next to it).");
+
+      const extractDir = output.replace(/\.(zip|tgz|tar\.gz)$/i, "");
+      await mkdir(extractDir, { recursive: true });
+
+      if (isZip) {
+        const tmpPath = output;
+        await writeFile(tmpPath, buffer);
+        const zip = await JSZip.loadAsync(buffer);
+        const extracted: string[] = [];
+        for (const [name, entry] of Object.entries(zip.files)) {
+          if (entry.dir || name.includes("__MACOSX/")) continue;
+          const entryBuffer = await entry.async("nodebuffer");
+          const target = path.join(extractDir, name.replace(/\//g, path.sep));
+          await mkdir(path.dirname(target), { recursive: true });
+          await writeFile(target, entryBuffer);
+          extracted.push(target);
+        }
+        await rm(tmpPath);
+        return jsonResult({ sourceUrl, extractedTo: extractDir, extractedCount: extracted.length, files: extracted });
+      }
+
+      // TGZ extraction
       const tmpPath = output;
       await writeFile(tmpPath, buffer);
-      const extractDir = output.replace(/\.zip$/i, "");
-      await mkdir(extractDir, { recursive: true });
-      // Extract using JSZip
-      const zip = await JSZip.loadAsync(buffer);
       const extracted: string[] = [];
-      for (const [name, entry] of Object.entries(zip.files)) {
-        if (entry.dir || name.includes("__MACOSX/")) continue;
-        const entryBuffer = await entry.async("nodebuffer");
-        const target = path.join(extractDir, name.replace(/\//g, path.sep));
-        await mkdir(path.dirname(target), { recursive: true });
-        await writeFile(target, entryBuffer);
-        extracted.push(target);
+      await tar.x({ file: tmpPath, cwd: extractDir });
+      // Collect extracted files
+      async function collect(dir: string) {
+        const entries = await readdir(dir, { withFileTypes: true });
+        for (const e of entries) {
+          const p = path.join(dir, e.name);
+          if (e.isDirectory()) await collect(p);
+          else extracted.push(p);
+        }
       }
+      await collect(extractDir);
       await rm(tmpPath);
       return jsonResult({ sourceUrl, extractedTo: extractDir, extractedCount: extracted.length, files: extracted });
     }
