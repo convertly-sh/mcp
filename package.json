@@ -1,6 +1,6 @@
 {
   "name": "@convertly/mcp",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Local MCP server for Convertly media workflows over approved filesystem folders.",
   "type": "module",
   "bin": {

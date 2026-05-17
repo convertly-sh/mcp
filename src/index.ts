@@ -197,10 +197,36 @@ async function resolveMediaInputs(
   return inputs.slice(0, limit);
 }
 
+function mimeFromExtension(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  const map: Record<string, string> = {
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".png": "image/png", ".webp": "image/webp", ".avif": "image/avif",
+    ".gif": "image/gif", ".tif": "image/tiff", ".tiff": "image/tiff",
+    ".heif": "image/heif", ".heic": "image/heic", ".svg": "image/svg+xml",
+    ".pdf": "application/pdf",
+    ".mp4": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm",
+    ".mkv": "video/x-matroska", ".avi": "video/x-msvideo",
+    ".mp3": "audio/mpeg", ".wav": "audio/wav", ".ogg": "audio/ogg",
+    ".m4a": "audio/mp4", ".flac": "audio/flac", ".aac": "audio/aac",
+    ".zip": "application/zip", ".tar": "application/x-tar",
+    ".gz": "application/gzip", ".tgz": "application/gzip",
+    ".7z": "application/x-7z-compressed", ".rar": "application/vnd.rar",
+  };
+  return map[ext] || "application/octet-stream";
+}
+
 async function postMediaFile(endpoint: string, filePath: string, extraParams: Record<string, string>) {
   const form = new FormData();
   const data = await readFile(filePath);
-  form.append("files", new Blob([data]), path.basename(filePath));
+  const mimeType = mimeFromExtension(filePath);
+  const filename = path.basename(filePath);
+  // Convertly's API uses 'files' for batch endpoints (/api/convert, /api/jobs)
+  // and 'file' for single-file endpoints (most of /api/media/*). Sending under
+  // both keys is harmless — each route reads whichever it expects.
+  const blob = new Blob([data], { type: mimeType });
+  form.append("files", blob, filename);
+  form.append("file", blob, filename);
   for (const [key, value] of Object.entries(extraParams)) {
     if (value !== undefined && value !== null && value !== "") form.append(key, String(value));
   }
@@ -815,12 +841,14 @@ server.registerTool(
       const entry = toEntry(input, s);
       const form = new FormData();
       const data = await readFile(input);
-      form.append("files", new Blob([data]), path.basename(input));
+      const blob = new Blob([data], { type: mimeFromExtension(input) });
+      form.append("files", blob, path.basename(input));
+      form.append("file", blob, path.basename(input));
       if (text) form.append("text", text);
       if (logoFile) {
         const logoPath = resolveAllowed(logoFile);
         const logoData = await readFile(logoPath);
-        form.append("watermarkFile", new Blob([logoData]), path.basename(logoPath));
+        form.append("watermarkFile", new Blob([logoData], { type: mimeFromExtension(logoPath) }), path.basename(logoPath));
       }
       form.append("position", position);
       form.append("opacity", String(opacity));
@@ -1055,7 +1083,7 @@ server.registerTool(
     for (const file of files) {
       const p = resolveAllowed(file);
       const data = await readFile(p);
-      form.append("files", new Blob([data]), path.basename(p));
+      form.append("files", new Blob([data], { type: mimeFromExtension(p) }), path.basename(p));
     }
     form.append("pageSize", pageSize);
     form.append("saveToStorage", "false");
