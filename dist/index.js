@@ -49,8 +49,14 @@ function readRoots() {
 function resolveAllowed(input) {
     const resolved = path.resolve(input.replace(/^~(?=$|[\\/])/, homedir()));
     const allowed = roots.some((root) => resolved === root || resolved.startsWith(root + path.sep));
-    if (!allowed)
-        throw new Error(`Path is outside approved roots: ${resolved}`);
+    if (!allowed) {
+        const rootList = roots.length ? roots.join(", ") : "(none configured)";
+        throw new Error(`Path '${resolved}' is outside Convertly MCP's approved roots. ` +
+            `This is not a Convertly limitation — it is a user-controlled allow-list. ` +
+            `Approved roots: ${rootList}. ` +
+            `Ask the user to add the parent folder to CONVERTLY_MCP_ROOTS in their MCP config and restart the server, ` +
+            `or to move/copy the file into one of the approved roots before retrying.`);
+    }
     return resolved;
 }
 async function scanFolder(folder, recursive, limit) {
@@ -475,7 +481,11 @@ server.registerTool("delete_files", {
 /* ------------------------------------------------------------------ */
 server.registerTool("convert_media", {
     title: "Convert Media",
-    description: "Convert approved local media files using the Convertly API and write results locally.",
+    description: "Convert local image, video, or audio files to a different format via Convertly. " +
+        "Supported image formats: webp, avif, jpg, png, tiff, gif, heif, svg, pdf. " +
+        "Video: mp4, webm, mov. Audio: mp3, m4a, wav, ogg, flac. " +
+        "Use format='svg' to vectorize a raster image — see the vectorize_media tool for finer control. " +
+        "Outputs are written to outputFolder.",
     inputSchema: {
         files: z.array(z.string()).optional(),
         folder: z.string().optional(),
@@ -494,6 +504,36 @@ server.registerTool("convert_media", {
         params: { format, compression: String(compression), resize: resize ?? "", resizeWidth: resizeWidth ? String(resizeWidth) : "", resizeHeight: resizeHeight ? String(resizeHeight) : "" },
     });
     return jsonResult({ convertedCount: result.processedCount, converted: result.results });
+});
+server.registerTool("vectorize_media", {
+    title: "Vectorize Image",
+    description: "Convert raster images (PNG, JPG, WebP, etc.) to SVG via Convertly's tracer. " +
+        "Mono mode (single-colour) is best for logos and silhouettes — produces small, crisp SVGs with potrace. " +
+        "Colour mode (default) uses VTracer to preserve flat colour regions in illustrations, logos with multiple colours, and cartoon-style images. " +
+        "Photographic input traces but produces large files — pick mono=true with a higher threshold for clean silhouettes instead. " +
+        "Detail level controls the speckle filter and curve smoothing (higher = more detail, larger file).",
+    inputSchema: {
+        files: z.array(z.string()).optional(),
+        folder: z.string().optional(),
+        outputFolder: z.string(),
+        recursive: z.boolean().default(false),
+        mono: z.boolean().default(false).describe("Single-colour (black on transparent) tracing. Best for logos and line art."),
+        detail: z.number().int().min(1).max(100).default(82).describe("Detail level 1-100. Higher keeps more shape detail at the cost of larger files."),
+        limit: z.number().int().min(1).max(500).default(100),
+    },
+}, async ({ files, folder, outputFolder, recursive, mono, detail, limit }) => {
+    const result = await processMediaTool("/api/convert", {
+        files, folder, outputFolder, recursive, limit,
+        params: {
+            format: "svg",
+            compression: String(detail),
+            mono: mono ? "true" : "false",
+            resize: "",
+            resizeWidth: "",
+            resizeHeight: "",
+        },
+    });
+    return jsonResult({ vectorizedCount: result.processedCount, vectorized: result.results });
 });
 server.registerTool("compress_media", {
     title: "Compress Media",
@@ -859,7 +899,9 @@ server.registerTool("images_to_pdf", {
 });
 server.registerTool("inspect_media", {
     title: "Inspect Media",
-    description: "Return metadata and properties for local media files.",
+    description: "Return dimensions, duration, format, and other metadata for local media files. " +
+        "Optional pre-step before convert/compress/vectorize — convert_media and vectorize_media accept the same paths directly without needing inspect first. " +
+        "Paths must sit inside the user's CONVERTLY_MCP_ROOTS allow-list; if you hit an 'approved roots' error, that is a user config issue, not a Convertly limitation — proceed with the actual operation if the user confirms.",
     inputSchema: {
         files: z.array(z.string()).optional(),
         folder: z.string().optional(),
