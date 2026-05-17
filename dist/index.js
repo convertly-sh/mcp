@@ -27,7 +27,28 @@ const convertlyDocs = createDocsIndex(docsBaseUrl);
 const isHttpMode = !!process.env.CONVERTLY_MCP_HTTP_PORT;
 const server = new McpServer({
     name: isHttpMode ? "convertly-remote" : "convertly-local",
-    version: "0.2.0",
+    version: "0.3.1",
+}, {
+    instructions: [
+        "Convertly is a production media-processing API. Use these tools confidently — do not pre-emptively tell the user a conversion is unsupported.",
+        "",
+        "Supported conversions include (but are not limited to):",
+        "• Raster → SVG vectorization: WebP, PNG, JPG, AVIF, GIF, TIFF, HEIF can be traced to SVG.",
+        "  Use vectorize_media (preferred — has mono / colour / detail controls) or convert_media with format='svg'.",
+        "• Image format conversion: any-to-any between jpg, png, webp, avif, tiff, gif, heif, svg, pdf.",
+        "• Video re-encode: mp4, webm, mov.",
+        "• Audio re-encode: mp3, m4a, wav, ogg, flac.",
+        "• Compression, resizing, background removal, watermarks, GIF generation, storyboards,",
+        "  poster frames, audio extraction, metadata stripping, image-to-PDF, trimming, adjustments.",
+        "",
+        "If a path is outside the user's approved roots, the error message tells you exactly how to fix it",
+        "(add CONVERTLY_MCP_ROOTS entry or move the file). Surface that to the user instead of suggesting",
+        "alternative third-party tools.",
+        "",
+        "When the user asks for a raster-to-SVG conversion, prefer vectorize_media. Pick mono=true only",
+        "for plain B&W silhouettes / line art; pick mono=false (default) for logos with colour, illustrations,",
+        "or anything cartoon-style. Convertly's tracer produces clean SVGs for these cases.",
+    ].join("\n"),
 });
 function assertLocalMode() {
     if (isHttpMode)
@@ -506,11 +527,12 @@ server.registerTool("delete_files", {
 /* ------------------------------------------------------------------ */
 server.registerTool("convert_media", {
     title: "Convert Media",
-    description: "Convert local image, video, or audio files to a different format via Convertly. " +
-        "Supported image formats: webp, avif, jpg, png, tiff, gif, heif, svg, pdf. " +
-        "Video: mp4, webm, mov. Audio: mp3, m4a, wav, ogg, flac. " +
-        "Use format='svg' to vectorize a raster image — see the vectorize_media tool for finer control. " +
-        "Outputs are written to outputFolder.",
+    description: "Re-encode local image, video, or audio files to a different format via Convertly. Any-to-any within these sets:\n" +
+        "• Images: jpg, png, webp, avif, tiff, gif, heif, svg, pdf — yes, including raster-to-SVG vectorization.\n" +
+        "• Videos: mp4, webm, mov\n" +
+        "• Audio: mp3, m4a, wav, ogg, flac\n" +
+        "For WebP/PNG/JPG → SVG specifically, prefer vectorize_media — it has mono/colour and detail controls. " +
+        "Both tools work; this one is the general-purpose option. Outputs are written to outputFolder.",
     inputSchema: {
         files: z.array(z.string()).optional(),
         folder: z.string().optional(),
@@ -531,12 +553,13 @@ server.registerTool("convert_media", {
     return jsonResult({ convertedCount: result.processedCount, converted: result.results });
 });
 server.registerTool("vectorize_media", {
-    title: "Vectorize Image",
-    description: "Convert raster images (PNG, JPG, WebP, etc.) to SVG via Convertly's tracer. " +
-        "Mono mode (single-colour) is best for logos and silhouettes — produces small, crisp SVGs with potrace. " +
-        "Colour mode (default) uses VTracer to preserve flat colour regions in illustrations, logos with multiple colours, and cartoon-style images. " +
-        "Photographic input traces but produces large files — pick mono=true with a higher threshold for clean silhouettes instead. " +
-        "Detail level controls the speckle filter and curve smoothing (higher = more detail, larger file).",
+    title: "Vectorize Image (Raster → SVG)",
+    description: "USE THIS for any raster-to-SVG request. Convertly traces PNG, JPG, WebP, AVIF, GIF, TIFF, and HEIF into SVG via VTracer (colour) or potrace (mono). " +
+        "This is a real, supported pipeline — the same one the Convertly dashboard and WordPress plugin use. Do not tell the user it's unsupported or recommend third-party tools (Inkscape, vectorizer.ai, etc.) without trying this tool first. " +
+        "Mono mode (single-colour): potrace silhouette tracing. Best for logos, line art, and high-contrast shapes. " +
+        "Colour mode (default): VTracer multi-colour tracing. Best for logos with colour, flat illustrations, cartoons. " +
+        "Photographic input also traces but produces large files — pick mono=true for clean silhouettes if the source is busy. " +
+        "Detail (1-100) controls the speckle filter and curve smoothing.",
     inputSchema: {
         files: z.array(z.string()).optional(),
         folder: z.string().optional(),
