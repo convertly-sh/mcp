@@ -350,7 +350,7 @@ server.registerTool("read_file", {
 });
 server.registerTool("create_archive", {
     title: "Create Archive",
-    description: "Create a ZIP, TAR, or TGZ archive from approved files or all files in an approved folder. Does not delete originals. Format is auto-detected from the output path extension (.zip, .tar, .tgz).",
+    description: "Create an archive from approved files or all files in an approved folder. Supports ZIP, TAR, TGZ, 7Z, RAR, GZ, BZ2, and XZ. Format is auto-detected from the output path extension.",
     inputSchema: {
         outputPath: z.string(),
         files: z.array(z.string()).optional(),
@@ -359,7 +359,7 @@ server.registerTool("create_archive", {
         olderThanDays: z.number().int().min(0).optional(),
         includeMediaOnly: z.boolean().default(false),
         limit: z.number().int().min(1).max(5000).default(1000),
-        format: z.enum(["zip", "tar", "tgz"]).optional(),
+        format: z.enum(["zip", "tar", "tgz", "7z", "rar", "gz", "bz2", "xz"]).optional(),
     },
 }, async ({ outputPath, files, folder, recursive, olderThanDays, includeMediaOnly, limit, format }) => {
     assertLocalMode();
@@ -368,9 +368,14 @@ server.registerTool("create_archive", {
     const detectedFormat = format ?? (ext === ".zip" ? "zip" :
         ext === ".tar" ? "tar" :
             ext === ".tgz" ? "tgz" :
-                null);
+                ext === ".7z" ? "7z" :
+                    ext === ".rar" ? "rar" :
+                        ext === ".gz" ? "gz" :
+                            ext === ".bz2" ? "bz2" :
+                                ext === ".xz" ? "xz" :
+                                    null);
     if (!detectedFormat) {
-        throw new Error(`Unsupported archive format: ${ext || "(none)"}. Supported: .zip, .tar, .tgz`);
+        throw new Error(`Unsupported archive format: ${ext || "(none)"}. Supported: .zip, .tar, .tgz, .7z, .rar, .gz, .bz2, .xz`);
     }
     const resolvedFolder = folder ? resolveAllowed(folder) : null;
     const inputs = files?.length
@@ -408,24 +413,65 @@ server.registerTool("create_archive", {
         await writeFile(output, buffer);
         return jsonResult({ outputPath: output, format: "zip", archivedCount: selected.length, sizeBytes: buffer.byteLength });
     }
-    // tar / tgz via temp workspace
-    const workspace = path.join(tmpdir(), `convertly-archive-${randomUUID()}`);
-    await mkdir(workspace, { recursive: true });
+    if (detectedFormat === "tar" || detectedFormat === "tgz") {
+        const workspace = path.join(tmpdir(), `convertly-archive-${randomUUID()}`);
+        await mkdir(workspace, { recursive: true });
+        try {
+            for (const file of selected) {
+                const archivePath = resolvedFolder
+                    ? path.relative(resolvedFolder, file.path)
+                    : file.name;
+                const dest = path.join(workspace, archivePath);
+                await mkdir(path.dirname(dest), { recursive: true });
+                await copyFile(file.path, dest);
+            }
+            await tar.create({ cwd: workspace, file: output, gzip: detectedFormat === "tgz" }, ["."]);
+            const stats = await stat(output);
+            return jsonResult({ outputPath: output, format: detectedFormat, archivedCount: selected.length, sizeBytes: stats.size });
+        }
+        finally {
+            await rm(workspace, { recursive: true, force: true });
+        }
+    }
+    // For 7z, rar, gz, bz2, xz: bundle into a temp ZIP locally, then use the
+    // Convertly API to convert the ZIP to the target archive format.
+    if (!apiKey)
+        throw new Error(`CONVERTLY_API_KEY is required to create ${detectedFormat.toUpperCase()} archives.`);
+    const tmpZip = path.join(tmpdir(), `convertly-archive-${randomUUID()}.zip`);
     try {
+        const zip = new JSZip();
         for (const file of selected) {
             const archivePath = resolvedFolder
-                ? path.relative(resolvedFolder, file.path)
+                ? path.relative(resolvedFolder, file.path).replace(/\\/g, "/")
                 : file.name;
-            const dest = path.join(workspace, archivePath);
-            await mkdir(path.dirname(dest), { recursive: true });
-            await copyFile(file.path, dest);
+            zip.file(archivePath, createReadStream(file.path));
         }
-        await tar.create({ cwd: workspace, file: output, gzip: detectedFormat === "tgz" }, ["."]);
-        const stats = await stat(output);
-        return jsonResult({ outputPath: output, format: detectedFormat, archivedCount: selected.length, sizeBytes: stats.size });
+        const zipBuffer = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE", compressionOptions: { level: 6 } });
+        if (zipBuffer.byteLength > 50 * 1024 * 1024) {
+            throw new Error(`Archive contents exceed 50 MB — the Convertly API synchronous limit. Use .zip or .tar locally, or reduce the file set.`);
+        }
+        await writeFile(tmpZip, zipBuffer);
+        const form = new FormData();
+        form.append("files", new Blob([new Uint8Array(zipBuffer)]), "archive.zip");
+        form.append("format", detectedFormat);
+        form.append("saveToStorage", "false");
+        const response = await fetch(`${baseUrl}/api/convert`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${apiKey}` },
+            body: form,
+        });
+        const payload = await response.json();
+        if (!response.ok)
+            throw new Error(payload.error ?? `API returned ${response.status}`);
+        const first = payload.files?.[0];
+        if (!first?.downloadUrl)
+            throw new Error("API did not return a processed archive.");
+        const archiveBuffer = await downloadToBuffer(first.downloadUrl);
+        await writeFile(output, archiveBuffer);
+        return jsonResult({ outputPath: output, format: detectedFormat, archivedCount: selected.length, sizeBytes: archiveBuffer.byteLength });
     }
     finally {
-        await rm(workspace, { recursive: true, force: true });
+        await rm(tmpZip, { force: true });
     }
 });
 server.registerTool("delete_files", {
