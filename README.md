@@ -15,7 +15,7 @@ Runs on your machine with access to local files. The AI agent can read and write
   "mcpServers": {
     "convertly": {
       "command": "npx",
-      "args": ["-y", "@convertly/mcp"],
+      "args": ["-y", "@convertly-sh/mcp"],
       "env": {
         "CONVERTLY_API_KEY": "cvly_your_api_key",
         "CONVERTLY_MCP_ROOTS": "/Users/you/Downloads:/Users/you/Pictures"
@@ -30,7 +30,7 @@ Runs on your machine with access to local files. The AI agent can read and write
 Runs as an HTTP server. The AI agent can use all API-based tools but cannot access your local filesystem.
 
 ```bash
-CONVERTLY_API_KEY=cvly_your_api_key CONVERTLY_MCP_HTTP_PORT=3000 npx @convertly/mcp
+CONVERTLY_API_KEY=cvly_your_api_key CONVERTLY_MCP_HTTP_PORT=3000 npx @convertly-sh/mcp
 ```
 
 Then connect to `http://localhost:3000/mcp`.
@@ -55,7 +55,7 @@ Configure your MCP client to run the package with `npx`:
   "mcpServers": {
     "convertly": {
       "command": "npx",
-      "args": ["-y", "@convertly/mcp"],
+      "args": ["-y", "@convertly-sh/mcp"],
       "env": {
         "CONVERTLY_API_KEY": "cvly_your_api_key",
         "CONVERTLY_MCP_ROOTS": "/Users/you/Downloads:/Users/you/Pictures"
@@ -72,7 +72,7 @@ On Windows, separate approved roots with `;`:
   "mcpServers": {
     "convertly": {
       "command": "npx",
-      "args": ["-y", "@convertly/mcp"],
+      "args": ["-y", "@convertly-sh/mcp"],
       "env": {
         "CONVERTLY_API_KEY": "cvly_your_api_key",
         "CONVERTLY_MCP_ROOTS": "C:/Users/you/Downloads;C:/Users/you/Pictures"
