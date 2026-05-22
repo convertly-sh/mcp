@@ -1310,6 +1310,255 @@ server.registerTool("rename_folder", {
     return jsonResult({ renamed: true, folderId, ...data });
 });
 /* ------------------------------------------------------------------ */
+/*  Workflows                                                           */
+/* ------------------------------------------------------------------ */
+// A workflow is a saved, reusable pipeline (upload → optional gate → convert
+// → optional compress / resize / rename → storage destination → optional
+// webhook / publish). Authoring requires a standard (not WordPress-scoped)
+// API key. Definitions match the dashboard builder's schema 1:1.
+const workflowNodeSchema = z.object({
+    id: z.string().min(1),
+    data: z.object({
+        title: z.string().optional(),
+        subtitle: z.string().optional(),
+        kind: z.enum([
+            // Trigger
+            "upload",
+            // Format & encoding (executor-backed today)
+            "convert",
+            "compress",
+            "resize",
+            "audio",
+            // Image transforms (executor-backed today)
+            "background_remove",
+            "adjust",
+            "strip_metadata",
+            // Image transforms (schema-only, executor in follow-up)
+            "transform",
+            "watermark",
+            // Video tools (schema-only, executor in follow-up)
+            "trim",
+            "thumbnail",
+            "poster_frame",
+            "storyboard",
+            "extract_audio",
+            "gif",
+            // Document tools (schema-only, executor in follow-up)
+            "image_to_pdf",
+            "pdf_preview",
+            // Utility (executor-backed today)
+            "rename",
+            "inspect",
+            // Delivery
+            "storage",
+            "webhook",
+            "publish",
+            "platform",
+            // Logic
+            "branch",
+        ]),
+        // Per-node config bag — each executor reads what it needs and ignores
+        // the rest. e.g. a `convert` node accepts `{ outputFormat: "webp",
+        // compressionLevel: 75 }`; `background_remove` takes
+        // `{ format: "png", model: "small" }`.
+        config: z
+            .record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()]))
+            .optional(),
+    }),
+});
+// Rich condition tree. An agent can express filters like
+// "MIME starts_with 'image/' AND size_bytes > 1048576" — see workflows docs.
+const conditionFieldEnum = z.enum([
+    "mime",
+    "filename",
+    "extension",
+    "size_bytes",
+    "width",
+    "height",
+    "duration",
+    "upload_source",
+]);
+const conditionOperatorEnum = z.enum([
+    "equals",
+    "not_equals",
+    "contains",
+    "starts_with",
+    "ends_with",
+    "matches",
+    "gt",
+    "lt",
+    "gte",
+    "lte",
+    "is_empty",
+    "is_not_empty",
+]);
+const conditionGroupSchema = z.lazy(() => z.object({
+    id: z.string(),
+    logic: z.enum(["and", "or"]),
+    negate: z.boolean().optional(),
+    conditions: z
+        .array(z.object({
+        id: z.string(),
+        field: conditionFieldEnum,
+        operator: conditionOperatorEnum,
+        value: z.string().optional(),
+        negate: z.boolean().optional(),
+    }))
+        .default([]),
+    groups: z.array(conditionGroupSchema).optional(),
+}));
+const workflowDefinitionSchema = z.object({
+    outputFormat: z.string(),
+    compressionLevel: z.number().int().min(1).max(100).default(75),
+    audioOutputFormat: z.enum(["mp3", "wav", "ogg", "m4a", "flac"]).default("mp3"),
+    nodes: z.array(workflowNodeSchema).min(1),
+    edges: z
+        .array(z.object({
+        source: z.string(),
+        target: z.string(),
+        kind: z.enum(["default", "true", "false"]).optional(),
+    }))
+        .default([]),
+    uploadSource: z.enum(["manual", "google-drive", "api", "webhook"]).default("api"),
+    uploadLogicGate: z.enum(["and", "or"]).default("and"),
+    uploadConditions: z
+        .array(z.enum(["images-only", "videos-only", "audio-only", "from-google-drive", "larger-than-100mb"]))
+        .default([]),
+    uploadGate: conditionGroupSchema.nullable().optional(),
+    branchConditions: z.record(z.string(), conditionGroupSchema).optional(),
+    storageDestination: z
+        .enum(["convertly-storage", "google-drive", "private-container", "external-url"])
+        .default("convertly-storage"),
+    webhookUrl: z.string().optional(),
+    storageUrl: z.string().optional(),
+    renamePattern: z.string().default("{original}-{format}"),
+    resizeWidth: z.string().default("1920"),
+    branchCondition: z.string().optional(),
+    selectedPlatforms: z.array(z.string()).optional(),
+});
+server.registerTool("list_workflows", {
+    title: "List Workflows",
+    description: "List all saved Convertly workflows on this account.",
+    inputSchema: {},
+}, async () => {
+    const data = await apiFetch("/api/workflows");
+    return jsonResult(data);
+});
+server.registerTool("create_workflow", {
+    title: "Create Workflow",
+    description: "Create a new Convertly workflow. A workflow is a reusable pipeline that runs whenever you call run_workflow with an input file. " +
+        "Minimal example: nodes=[{id:'upload',data:{kind:'upload'}},{id:'convert',data:{kind:'convert'}},{id:'storage',data:{kind:'storage'}}], " +
+        "edges=[{source:'upload',target:'convert'},{source:'convert',target:'storage'}], outputFormat='webp'.",
+    inputSchema: {
+        name: z.string().min(1).max(80),
+        outputFormat: z.string().describe("Final output format, e.g. 'webp', 'mp4', 'mp3'."),
+        template: z
+            .enum(["convert-post", "compress-post", "convert-compress-post"])
+            .default("convert-post"),
+        compressionMode: z
+            .union([z.enum(["high", "balanced", "ultra"]), z.number().int().min(1).max(100)])
+            .default("balanced"),
+        isActive: z.boolean().default(true),
+        definition: workflowDefinitionSchema,
+    },
+}, async ({ name, outputFormat, template, compressionMode, isActive, definition }) => {
+    const data = await apiFetch("/api/workflows", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            name,
+            template,
+            outputFormat,
+            compressionMode: typeof compressionMode === "number" ? String(compressionMode) : compressionMode,
+            isActive,
+            definition,
+        }),
+    });
+    return jsonResult(data);
+});
+server.registerTool("update_workflow", {
+    title: "Update Workflow",
+    description: "Replace the entire definition of an existing workflow. Provide the same fields as create_workflow plus the workflow id.",
+    inputSchema: {
+        id: z.string().uuid(),
+        name: z.string().min(1).max(80),
+        outputFormat: z.string(),
+        template: z.enum(["convert-post", "compress-post", "convert-compress-post"]).default("convert-post"),
+        compressionMode: z.union([z.enum(["high", "balanced", "ultra"]), z.number().int().min(1).max(100)]).default("balanced"),
+        isActive: z.boolean().default(true),
+        definition: workflowDefinitionSchema,
+    },
+}, async ({ id, name, outputFormat, template, compressionMode, isActive, definition }) => {
+    const data = await apiFetch("/api/workflows", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            id,
+            name,
+            template,
+            outputFormat,
+            compressionMode: typeof compressionMode === "number" ? String(compressionMode) : compressionMode,
+            isActive,
+            definition,
+        }),
+    });
+    return jsonResult(data);
+});
+server.registerTool("set_workflow_active", {
+    title: "Pause / Resume Workflow",
+    description: "Toggle a workflow between active and paused. Paused workflows still exist but reject run_workflow calls.",
+    inputSchema: { id: z.string().uuid(), isActive: z.boolean() },
+}, async ({ id, isActive }) => {
+    const data = await apiFetch(`/api/workflows/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ isActive }),
+    });
+    return jsonResult(data);
+});
+server.registerTool("delete_workflow", {
+    title: "Delete Workflow",
+    description: "Delete a Convertly workflow. Past runs are kept.",
+    inputSchema: { id: z.string().uuid(), confirm: z.boolean().default(false) },
+}, async ({ id, confirm }) => {
+    if (!confirm)
+        return jsonResult({ dryRun: true, wouldDelete: id, note: "Call again with confirm=true to delete." });
+    const data = await apiFetch(`/api/workflows/${id}`, { method: "DELETE" });
+    return jsonResult({ deleted: true, id, ...data });
+});
+server.registerTool("run_workflow", {
+    title: "Run Workflow",
+    description: "Run a saved workflow against a local file. Uploads the file to Convertly, executes every step in the workflow definition, and returns the run record. " +
+        "Use list_workflows first if you don't have a workflow id.",
+    inputSchema: { workflowId: z.string().uuid(), filePath: z.string() },
+}, async ({ workflowId, filePath }) => {
+    assertLocalMode();
+    const absolute = resolveAllowed(filePath);
+    const data = await readFile(absolute);
+    const mimeType = mimeFromExtension(absolute);
+    const filename = path.basename(absolute);
+    const form = new FormData();
+    form.append("file", new Blob([data], { type: mimeType }), filename);
+    const response = await fetch(`${baseUrl}/api/workflows/${workflowId}/run`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apiKey}` },
+        body: form,
+    });
+    const text = await response.text();
+    const payload = text ? JSON.parse(text) : {};
+    if (!response.ok)
+        throw new Error(payload.error ?? `API error ${response.status}`);
+    return jsonResult(payload);
+});
+server.registerTool("list_workflow_runs", {
+    title: "List Workflow Runs",
+    description: "List the 50 most recent runs of a specific workflow.",
+    inputSchema: { workflowId: z.string().uuid() },
+}, async ({ workflowId }) => {
+    const data = await apiFetch(`/api/workflows/${workflowId}/run`);
+    return jsonResult(data);
+});
+/* ------------------------------------------------------------------ */
 /*  Main                                                                */
 /* ------------------------------------------------------------------ */
 const MAX_HTTP_SESSIONS = Number(process.env.CONVERTLY_MCP_MAX_SESSIONS ?? "100");
