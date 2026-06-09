@@ -1,19 +1,26 @@
 {
   "name": "@convertly-sh/mcp",
-  "version": "0.3.3",
+  "version": "0.3.5",
   "description": "Local MCP server for Convertly media workflows over approved filesystem folders.",
+  "homepage": "https://convertly.sh",
+  "bugs": {
+    "url": "https://convertly.sh/support"
+  },
   "type": "module",
   "bin": {
-    "convertly-mcp": "./dist/index.js"
+    "convertly-mcp": "bin/convertly-mcp.mjs"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "files": [
+    "bin",
     "dist",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run build",
     "dev": "tsx src/index.ts"
   },
   "keywords": [
@@ -36,5 +43,8 @@
     "@types/tar": "^6.1.13",
     "tsx": "^4.21.0",
     "typescript": "^5"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

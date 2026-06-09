@@ -24,10 +24,53 @@ const apiKey = process.env.CONVERTLY_API_KEY ?? "";
 const baseUrl = (process.env.CONVERTLY_BASE_URL ?? "https://convertly.sh").replace(/\/$/, "");
 const docsBaseUrl = "https://docs.convertly.sh";
 const convertlyDocs = createDocsIndex(docsBaseUrl);
+const defaultCdnBaseUrl = (process.env.CONVERTLY_CDN_BASE_URL ?? "https://cdn.convertly.sh").replace(/\/$/, "");
+function appendCdnQuery(search, params) {
+    for (const [key, value] of Object.entries(params)) {
+        if (value === undefined || value === null || value === "")
+            continue;
+        if (typeof value === "boolean") {
+            if (value)
+                search.set(key, "1");
+            continue;
+        }
+        search.set(key, String(value));
+    }
+}
+function buildCdnUrl(input) {
+    const base = (input.baseUrl ?? defaultCdnBaseUrl).replace(/\/$/, "");
+    const search = new URLSearchParams();
+    const params = { ...(input.params ?? {}) };
+    if (input.mode === "gif")
+        params.format = "gif";
+    if (input.mode === "poster" && params.poster === undefined && params.t === undefined && params.time === undefined) {
+        params.poster = true;
+    }
+    appendCdnQuery(search, params);
+    const query = search.toString();
+    let root;
+    if (input.mode === "origin") {
+        if (!input.originSlug || !input.originPath) {
+            throw new Error("originSlug and originPath are required when mode is origin.");
+        }
+        const safeSlug = encodeURIComponent(input.originSlug);
+        const safePath = input.originPath
+            .replace(/^\/+/, "")
+            .split("/")
+            .filter(Boolean)
+            .map((part) => encodeURIComponent(part))
+            .join("/");
+        root = `${base}/${input.deliveryKey}/o/${safeSlug}/${safePath}`;
+    }
+    else {
+        root = `${base}/${input.deliveryKey}/${input.fileId}`;
+    }
+    return query ? `${root}?${query}` : root;
+}
 const isHttpMode = !!process.env.CONVERTLY_MCP_HTTP_PORT;
 const server = new McpServer({
     name: isHttpMode ? "convertly-remote" : "convertly-local",
-    version: "0.3.3",
+    version: "0.3.4",
 }, {
     instructions: [
         "Convertly is a production media-processing API. Trust the tool catalogue.",
@@ -46,6 +89,8 @@ const server = new McpServer({
         "• Audio re-encode: mp3, m4a, wav, ogg, flac.",
         "• Plus compression, resize, background removal, watermarks, GIFs, storyboards, poster frames,",
         "  audio extraction, metadata stripping, image-to-PDF, trim, adjust.",
+        "• Image & video CDN URL transforms: resize, format negotiation, smart crop, trim transparent",
+        "  borders (logos), video transcode/clip, poster frames, animated GIFs. Use build_cdn_url.",
         "",
         "If a path is outside the user's approved roots, the error message tells you exactly how to fix it",
         "(add CONVERTLY_MCP_ROOTS entry or move the file). Surface that to the user.",
@@ -325,6 +370,52 @@ server.registerTool("convertly_capabilities", {
         remote_url_to_local: "transfer_url",
         currency_conversion: "convert_currency",
     },
+    image_and_video_cdn: {
+        supported: true,
+        tool: "build_cdn_url",
+        docs: "https://docs.convertly.sh/docs/image-cdn/transforms",
+        modes: {
+            image: "Raster transforms — w, h, q, fit, gravity, format, trim (transparent border crop), text overlay, presets",
+            poster: "Extract a video poster frame — t/time, w, format=webp",
+            video: "Transcode / clip stored video — format=mp4|webm|mov, so, du, mute, w, h",
+            gif: "Animated GIF from video — format=gif (auto), so, du, fps, w",
+            origin: "Transform assets from a configured HTTPS origin source",
+        },
+        trim_transparent_borders: {
+            param: "trim=1",
+            aliases: ["trimAlpha", "trim-alpha"],
+            use_case: "Logos and PNG/WebP cutouts with extra transparent padding",
+        },
+    },
+}));
+server.registerTool("build_cdn_url", {
+    title: "Build Convertly CDN URL",
+    description: "Build a Convertly CDN URL for image transforms, video transcode/clip, poster frames, GIFs, or origin-backed assets. " +
+        "Use trim=1 (or trim: true) to crop transparent borders from logos. Does not require the media API — URLs are rendered on request at the edge.",
+    inputSchema: {
+        deliveryKey: z.string().min(1).describe("Publishable delivery key (cvly_pub_…)."),
+        fileId: z.string().min(1).describe("Convertly Storage file id (UUID). Ignored when mode=origin."),
+        mode: z.enum(["image", "video", "poster", "gif", "origin"]).default("image"),
+        baseUrl: z.string().url().optional().describe("CDN base URL. Defaults to https://cdn.convertly.sh or CONVERTLY_CDN_BASE_URL."),
+        originSlug: z.string().optional().describe("Origin source slug when mode=origin."),
+        originPath: z.string().optional().describe("Path under the origin when mode=origin."),
+        params: z
+            .record(z.string(), z.union([z.string(), z.number(), z.boolean()]))
+            .optional()
+            .describe("Transform query params — e.g. { w: 800, format: 'webp', trim: true } or { format: 'mp4', so: 0, du: 30, mute: true }"),
+    },
+}, async ({ deliveryKey, fileId, mode, baseUrl: cdnBaseUrl, originSlug, originPath, params }) => jsonResult({
+    url: buildCdnUrl({
+        deliveryKey,
+        fileId,
+        baseUrl: cdnBaseUrl,
+        mode,
+        originSlug,
+        originPath,
+        params,
+    }),
+    mode,
+    docs: "https://docs.convertly.sh/docs/image-cdn/transforms",
 }));
 /* ------------------------------------------------------------------ */
 /*  Docs tools                                                          */
