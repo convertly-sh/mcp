@@ -3,8 +3,12 @@
   "version": "0.3.5",
   "description": "Local MCP server for Convertly media workflows over approved filesystem folders.",
   "homepage": "https://convertly.sh",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/convertly-sh/mcp.git"
+  },
   "bugs": {
-    "url": "https://convertly.sh/support"
+    "url": "https://github.com/convertly-sh/mcp/issues"
   },
   "type": "module",
   "bin": {
