@@ -368,7 +368,6 @@ server.registerTool("convertly_capabilities", {
     },
     transfers: {
         remote_url_to_local: "transfer_url",
-        currency_conversion: "convert_currency",
     },
     image_and_video_cdn: {
         supported: true,
@@ -1253,26 +1252,6 @@ server.registerTool("transfer_url", {
     return jsonResult({ sourceUrl, outputPath: output, sizeBytes: buffer.byteLength });
 });
 /* ------------------------------------------------------------------ */
-/*  Currency                                                            */
-/* ------------------------------------------------------------------ */
-server.registerTool("convert_currency", {
-    title: "Convert Currency",
-    description: "Convert an amount from one currency to another using Convertly exchange rates.",
-    inputSchema: {
-        amount: z.union([z.string(), z.number()]),
-        from: z.string().length(3).toUpperCase(),
-        to: z.string().length(3).toUpperCase(),
-        precision: z.number().int().min(0).max(12).default(6),
-    },
-}, async ({ amount, from, to, precision }) => {
-    const data = await apiFetch("/api/currency/convert", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ amount: String(amount), from, to, precision }),
-    });
-    return jsonResult(data);
-});
-/* ------------------------------------------------------------------ */
 /*  Async jobs                                                          */
 /* ------------------------------------------------------------------ */
 server.registerTool("list_jobs", {
@@ -1782,7 +1761,6 @@ function createDocsIndex(origin) {
         page("docs/files-and-storage", "Files and Storage", "Store, organize, retrieve, and manage files in Convertly Storage.", ["storage", "files", "folders"]),
         page("docs/transfer-api", "Transfer API", "Fetch public file URLs and return them or save them to Convertly Storage.", ["transfer", "move", "remote url", "storage"]),
         page("docs/webhooks", "Webhooks", "Receive Convertly events when jobs and workflows complete.", ["webhook", "events"]),
-        page("docs/currency-conversion", "Currency Conversion", "Convert currencies through Convertly utility APIs.", ["currency", "fx", "rates"]),
         page("limits", "Limits", "Plan limits, quotas, and usage controls.", ["pricing", "quota", "limits", "overage"]),
         page("errors", "Errors", "Understand Convertly API error shapes and status codes.", ["errors", "status codes"]),
         page("guides/media-conversion", "Media Conversion Guide", "Design reliable media conversion flows.", ["guide", "convert"]),
@@ -1791,7 +1769,6 @@ function createDocsIndex(origin) {
         page("guides/workflows", "Workflows Guide", "Compose and run multi-step media automation.", ["guide", "workflow"]),
         page("guides/wordpress-media-optimization", "WordPress Media Optimization", "Optimize WordPress uploads with Convertly.", ["guide", "wordpress"]),
         page("guides/async-jobs", "Async Jobs Guide", "Use background jobs for larger files and longer-running media tasks.", ["guide", "jobs"]),
-        page("guides/currency", "Currency Guide", "Use Convertly for currency conversion flows.", ["guide", "currency"]),
         page("guides/webhooks", "Webhooks Guide", "Secure and operate webhook integrations.", ["guide", "webhooks"]),
     ];
 }
