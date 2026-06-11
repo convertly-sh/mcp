@@ -70,7 +70,7 @@ function buildCdnUrl(input) {
 const isHttpMode = !!process.env.CONVERTLY_MCP_HTTP_PORT;
 const server = new McpServer({
     name: isHttpMode ? "convertly-remote" : "convertly-local",
-    version: "0.3.4",
+    version: "0.3.6",
 }, {
     instructions: [
         "Convertly is a production media-processing API. Trust the tool catalogue.",
@@ -817,7 +817,10 @@ server.registerTool("transform_image", {
         outputFolder: z.string(),
         recursive: z.boolean().default(false),
         format: z.enum(["jpg", "png", "webp", "avif"]).default("webp"),
-        preset: z.enum(["ecommerce", "avatar", "blog-hero", "social-preview"]).optional(),
+        preset: z.enum([
+            "thumb", "hero", "og-card", "product", "email", "gallery",
+            "ecommerce", "avatar", "blog-hero", "social-preview",
+        ]).optional(),
         width: z.number().int().min(1).optional(),
         height: z.number().int().min(1).optional(),
         fit: z.enum(["cover", "contain", "fill", "inside", "outside"]).default("cover"),

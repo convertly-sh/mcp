@@ -106,7 +106,7 @@ const isHttpMode = !!process.env.CONVERTLY_MCP_HTTP_PORT;
 const server = new McpServer(
   {
     name: isHttpMode ? "convertly-remote" : "convertly-local",
-    version: "0.3.4",
+    version: "0.3.6",
   },
   {
     instructions: [
