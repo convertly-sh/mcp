@@ -106,7 +106,7 @@ const isHttpMode = !!process.env.CONVERTLY_MCP_HTTP_PORT;
 const server = new McpServer(
   {
     name: isHttpMode ? "convertly-remote" : "convertly-local",
-    version: "0.3.7",
+    version: "0.3.8",
   },
   {
     instructions: [
@@ -128,9 +128,8 @@ const server = new McpServer(
       "  audio extraction, metadata stripping, image-to-PDF, trim, adjust.",
       "• Image & video CDN URL transforms: resize, format negotiation, smart crop, trim transparent",
       "  borders (logos), video transcode/clip, poster frames, animated GIFs. Use build_cdn_url.",
-      "• Forma AI (Pro+): generate images from text, edit/upscale/replace backgrounds, analyze images.",
-      "  Use forma_ai_transform and forma_ai_analyze — bills Forma AI units from your Convertly plan.",
-      "  Great for agents/models without native image generation: outsource gen to Convertly.",
+      "• Forma AI: generate images from text, edit/upscale/replace backgrounds, analyze images.",
+      "  Use forma_ai_transform and forma_ai_analyze — bills Forma AI units (all plans; Free 300/mo).",
       "",
       "If a path is outside the user's approved roots, the error message tells you exactly how to fix it",
       "(add CONVERTLY_MCP_ROOTS entry or move the file). Surface that to the user.",
@@ -502,7 +501,7 @@ server.registerTool(
     },
     forma_ai: {
       supported: true,
-      plan: "Pro and above (Forma AI unit quota; overage when enabled)",
+      plans: "All plans with Forma AI units (Free 300/mo, Starter 7,500/mo; Pro+ overage when enabled)",
       tools: {
         analyze: "forma_ai_analyze — describe, alt-text, tags, moderation (JSON)",
         transform: "forma_ai_transform — generate, edit, upscale, background-replace, style-transfer, outpaint, object-remove",
@@ -1735,7 +1734,7 @@ server.registerTool(
     title: "Forma AI — Analyze Image",
     description:
       "Run Forma AI vision analysis on an image. Returns JSON (summary, alt text, tags, safety). " +
-      "Bills Forma AI units from your Convertly plan (Pro+). " +
+      "Bills Forma AI units (included on all plans; Free 300/mo). " +
       "Provide a local filePath (stdio mode), a public sourceUrl, or upload via API separately.",
     inputSchema: {
       operation: z.enum(formaAiAnalyzeOperations).default("image.describe"),
@@ -1767,7 +1766,7 @@ server.registerTool(
       "e.g. website heroes, product shots, ad creatives from a text prompt (image.generate). " +
       "Also edit, upscale, replace backgrounds, style-transfer, outpaint, or remove objects on an existing image. " +
       "Results are saved to your Convertly cloud library with a signed downloadUrl. " +
-      "Optional outputPath saves the file locally (stdio mode). Bills Forma AI units (Pro+). " +
+      "Optional outputPath saves the file locally (stdio mode). Bills Forma AI units (all plans). " +
       "Pass async=true for long jobs and poll with get_job.",
     inputSchema: {
       operation: z.enum(formaAiTransformOperations),
