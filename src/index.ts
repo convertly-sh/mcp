@@ -106,7 +106,7 @@ const isHttpMode = !!process.env.CONVERTLY_MCP_HTTP_PORT;
 const server = new McpServer(
   {
     name: isHttpMode ? "convertly-remote" : "convertly-local",
-    version: "0.3.6",
+    version: "0.3.7",
   },
   {
     instructions: [
@@ -128,6 +128,9 @@ const server = new McpServer(
       "  audio extraction, metadata stripping, image-to-PDF, trim, adjust.",
       "• Image & video CDN URL transforms: resize, format negotiation, smart crop, trim transparent",
       "  borders (logos), video transcode/clip, poster frames, animated GIFs. Use build_cdn_url.",
+      "• Forma AI (Pro+): generate images from text, edit/upscale/replace backgrounds, analyze images.",
+      "  Use forma_ai_transform and forma_ai_analyze — bills Forma AI units from your Convertly plan.",
+      "  Great for agents/models without native image generation: outsource gen to Convertly.",
       "",
       "If a path is outside the user's approved roots, the error message tells you exactly how to fix it",
       "(add CONVERTLY_MCP_ROOTS entry or move the file). Surface that to the user.",
@@ -255,6 +258,50 @@ async function apiFetch(endpoint: string, init?: RequestInit) {
   const data = text ? JSON.parse(text) : {};
   if (!response.ok) throw new Error(data.error ?? `API error ${response.status}`);
   return data;
+}
+
+function aiQuotaFromHeaders(headers: Headers) {
+  const pick = (name: string) => headers.get(name) ?? undefined;
+  return {
+    limitMonth: pick("x-convertly-ai-limit-month"),
+    usedMonth: pick("x-convertly-ai-used-month"),
+    remainingMonth: pick("x-convertly-ai-remaining-month"),
+    limitMinute: pick("x-convertly-ai-limit-minute"),
+    usedMinute: pick("x-convertly-ai-used-minute"),
+  };
+}
+
+async function apiFormPost(endpoint: string, form: FormData) {
+  if (!apiKey) throw new Error("CONVERTLY_API_KEY is required.");
+  const response = await fetch(`${baseUrl}${endpoint}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}` },
+    body: form,
+  });
+  const text = await response.text();
+  const data = text ? JSON.parse(text) as Record<string, unknown> : {};
+  if (!response.ok) throw new Error(typeof data.error === "string" ? data.error : `API error ${response.status}`);
+  return { data, quota: aiQuotaFromHeaders(response.headers) };
+}
+
+async function appendLocalImageToForm(form: FormData, filePath?: string) {
+  if (!filePath) return;
+  assertLocalMode();
+  const resolved = resolveAllowed(filePath);
+  const buffer = await readFile(resolved);
+  const mimeType = mimeFromExtension(resolved);
+  const blob = new Blob([buffer], { type: mimeType });
+  form.append("file", blob, path.basename(resolved));
+}
+
+async function saveTransformLocally(downloadUrl: string | null | undefined, outputPath?: string) {
+  if (!outputPath || !downloadUrl) return undefined;
+  assertLocalMode();
+  const out = resolveAllowed(outputPath);
+  const buffer = await downloadToBuffer(downloadUrl);
+  await mkdir(path.dirname(out), { recursive: true });
+  await writeFile(out, buffer);
+  return { outputPath: out, bytes: buffer.byteLength };
 }
 
 async function downloadToBuffer(url: string): Promise<Buffer> {
@@ -452,6 +499,20 @@ server.registerTool(
         aliases: ["trimAlpha", "trim-alpha"],
         use_case: "Logos and PNG/WebP cutouts with extra transparent padding",
       },
+    },
+    forma_ai: {
+      supported: true,
+      plan: "Pro and above (Forma AI unit quota; overage when enabled)",
+      tools: {
+        analyze: "forma_ai_analyze — describe, alt-text, tags, moderation (JSON)",
+        transform: "forma_ai_transform — generate, edit, upscale, background-replace, style-transfer, outpaint, object-remove",
+      },
+      use_cases: [
+        "Outsource image generation to agents/models without native image gen",
+        "Website hero/product/marketing images from text prompts",
+        "Edit or upscale library or local images; results saved to Convertly storage",
+      ],
+      docs: "https://docs.convertly.sh/docs/ai-tools",
     },
   }),
 );
@@ -1649,6 +1710,119 @@ server.registerTool(
       body: JSON.stringify({ name }),
     });
     return jsonResult({ renamed: true, folderId, ...data });
+  },
+);
+
+/* ------------------------------------------------------------------ */
+/*  Forma AI                                                            */
+/* ------------------------------------------------------------------ */
+
+const formaAiAspectRatios = ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "4:5", "5:4", "21:9"] as const;
+const formaAiAnalyzeOperations = ["image.describe", "image.alt-text", "image.tags", "image.moderate"] as const;
+const formaAiTransformOperations = [
+  "image.generate",
+  "image.edit",
+  "image.upscale",
+  "image.background-replace",
+  "image.style-transfer",
+  "image.outpaint",
+  "image.object-remove",
+] as const;
+
+server.registerTool(
+  "forma_ai_analyze",
+  {
+    title: "Forma AI — Analyze Image",
+    description:
+      "Run Forma AI vision analysis on an image. Returns JSON (summary, alt text, tags, safety). " +
+      "Bills Forma AI units from your Convertly plan (Pro+). " +
+      "Provide a local filePath (stdio mode), a public sourceUrl, or upload via API separately.",
+    inputSchema: {
+      operation: z.enum(formaAiAnalyzeOperations).default("image.describe"),
+      prompt: z.string().max(2000).optional().describe("Optional context, e.g. 'Write alt text for an ecommerce grid.'"),
+      filePath: z.string().optional().describe("Local image path inside CONVERTLY_MCP_ROOTS (stdio mode)."),
+      sourceUrl: z.string().url().optional().describe("Public HTTPS image URL."),
+    },
+  },
+  async ({ operation, prompt, filePath, sourceUrl }) => {
+    if (!filePath && !sourceUrl) {
+      throw new Error("Provide filePath (local) or sourceUrl (public HTTPS).");
+    }
+    const form = new FormData();
+    form.append("operation", operation);
+    if (prompt) form.append("prompt", prompt);
+    if (sourceUrl) form.append("sourceUrl", sourceUrl);
+    await appendLocalImageToForm(form, filePath);
+    const { data, quota } = await apiFormPost("/api/ai/tools", form);
+    return jsonResult({ ...data, quota });
+  },
+);
+
+server.registerTool(
+  "forma_ai_transform",
+  {
+    title: "Forma AI — Generate / Edit / Upscale Image",
+    description:
+      "Forma AI generative image transforms via Convertly. Use this to outsource image generation to agents that lack native image gen — " +
+      "e.g. website heroes, product shots, ad creatives from a text prompt (image.generate). " +
+      "Also edit, upscale, replace backgrounds, style-transfer, outpaint, or remove objects on an existing image. " +
+      "Results are saved to your Convertly cloud library with a signed downloadUrl. " +
+      "Optional outputPath saves the file locally (stdio mode). Bills Forma AI units (Pro+). " +
+      "Pass async=true for long jobs and poll with get_job.",
+    inputSchema: {
+      operation: z.enum(formaAiTransformOperations),
+      prompt: z.string().max(2000).optional().describe("Required for generate/edit/background/style/object-remove. Optional for upscale."),
+      filePath: z.string().optional().describe("Local source image (stdio). Not used for image.generate."),
+      storedFileId: z.string().uuid().optional().describe("Source file already in Convertly storage."),
+      sourceUrl: z.string().url().optional().describe("Public HTTPS source image URL."),
+      aspectRatio: z.enum(formaAiAspectRatios).optional().describe("Output canvas shape; most useful with image.generate."),
+      async: z.boolean().default(false).describe("Queue the job; returns job id — poll with get_job."),
+      outputPath: z.string().optional().describe("Save the result to this local path (stdio mode)."),
+      expandTop: z.number().int().min(0).max(4096).default(0),
+      expandRight: z.number().int().min(0).max(4096).default(0),
+      expandBottom: z.number().int().min(0).max(4096).default(0),
+      expandLeft: z.number().int().min(0).max(4096).default(0),
+    },
+  },
+  async ({
+    operation,
+    prompt,
+    filePath,
+    storedFileId,
+    sourceUrl,
+    aspectRatio,
+    async: runAsync,
+    outputPath,
+    expandTop,
+    expandRight,
+    expandBottom,
+    expandLeft,
+  }) => {
+    if (operation === "image.generate") {
+      if (!prompt?.trim()) throw new Error("image.generate requires a prompt.");
+    } else if (!filePath && !storedFileId && !sourceUrl) {
+      throw new Error(`${operation} requires filePath, storedFileId, or sourceUrl.`);
+    }
+
+    const form = new FormData();
+    form.append("operation", operation);
+    if (prompt) form.append("prompt", prompt);
+    if (storedFileId) form.append("storedFileId", storedFileId);
+    if (sourceUrl) form.append("sourceUrl", sourceUrl);
+    if (aspectRatio) form.append("aspectRatio", aspectRatio);
+    form.append("async", runAsync ? "true" : "false");
+    if (operation === "image.outpaint") {
+      form.append("expandTop", String(expandTop));
+      form.append("expandRight", String(expandRight));
+      form.append("expandBottom", String(expandBottom));
+      form.append("expandLeft", String(expandLeft));
+    }
+    await appendLocalImageToForm(form, filePath);
+
+    const { data, quota } = await apiFormPost("/api/ai/transform", form);
+    const result = data.result as { downloadUrl?: string | null } | undefined;
+    const saved = await saveTransformLocally(result?.downloadUrl, outputPath);
+    return jsonResult({ ...data, savedLocally: saved, quota });
   },
 );
 
