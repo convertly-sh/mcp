@@ -13,7 +13,7 @@ Docs: <a href="https://docs.convertly.sh/docs/mcp-agents" target="_blank" rel="n
       "command": "npx",
       "args": ["-y", "@convertly-sh/mcp"],
       "env": {
-        "CONVERTLY_API_KEY": "cvly_your_api_key",
+        "CONVERTLY_API_KEY": "<paste-your-key-here>",
         "CONVERTLY_MCP_ROOTS": "/Users/you/Downloads:/Users/you/Pictures"
       }
     }
