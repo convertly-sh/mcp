@@ -23,6 +23,25 @@ Docs: <a href="https://docs.convertly.sh/docs/mcp-agents" target="_blank" rel="n
 
 On Windows, separate roots with `;`.
 
+Windows example (JSON paths require doubled backslashes):
+
+```json
+{
+  "mcpServers": {
+    "convertly": {
+      "command": "npx",
+      "args": ["-y", "@convertly-sh/mcp"],
+      "env": {
+        "CONVERTLY_API_KEY": "<paste-your-key-here>",
+        "CONVERTLY_MCP_ROOTS": "C:\\Users\\you\\Downloads;C:\\Users\\you\\Pictures"
+      }
+    }
+  }
+}
+```
+
+After rotating a key or editing this file, fully quit and reopen the MCP client so the server receives the new environment variables.
+
 ## Source on npm
 
 Browse published files on <a href="https://www.npmjs.com/package/@convertly-sh/mcp?activeTab=code" target="_blank" rel="noopener noreferrer">npm → Code</a> (`dist/`, `bin/`, `LICENSE`). The main Convertly repo is private; this package is MIT-licensed.

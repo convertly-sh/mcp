@@ -41,7 +41,7 @@ const archiveExtensions = new Set([".zip", ".tar", ".gz", ".tgz", ".7z", ".rar",
 const documentExtensions = new Set([".pdf", ".doc", ".docx", ".txt", ".csv", ".md", ".json"]);
 
 const roots = readRoots();
-const apiKey = process.env.CONVERTLY_API_KEY ?? "";
+const apiKey = process.env.CONVERTLY_API_KEY?.trim() ?? "";
 const baseUrl = (process.env.CONVERTLY_BASE_URL ?? "https://convertly.sh").replace(/\/$/, "");
 const docsBaseUrl = "https://docs.convertly.sh";
 const convertlyDocs = createDocsIndex(docsBaseUrl);
@@ -106,7 +106,7 @@ const isHttpMode = !!process.env.CONVERTLY_MCP_HTTP_PORT;
 const server = new McpServer(
   {
     name: isHttpMode ? "convertly-remote" : "convertly-local",
-    version: "0.3.8",
+    version: "0.3.10",
   },
   {
     instructions: [
