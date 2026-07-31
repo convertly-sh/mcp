@@ -39,6 +39,11 @@ const videoExtensions = new Set([".mp4", ".mov", ".webm", ".mkv", ".avi"]);
 const audioExtensions = new Set([".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac"]);
 const archiveExtensions = new Set([".zip", ".tar", ".gz", ".tgz", ".7z", ".rar", ".bz2", ".xz"]);
 const documentExtensions = new Set([".pdf", ".doc", ".docx", ".txt", ".csv", ".md", ".json"]);
+const conversionFormats = new Set([
+  "jpg", "png", "webp", "avif", "tiff", "gif", "heif", "svg", "pdf",
+  "mp4", "webm", "mov",
+  "mp3", "m4a", "wav", "ogg", "flac",
+]);
 
 const roots = readRoots();
 const apiKey = process.env.CONVERTLY_API_KEY?.trim() ?? "";
@@ -106,7 +111,7 @@ const isHttpMode = !!process.env.CONVERTLY_MCP_HTTP_PORT;
 const server = new McpServer(
   {
     name: isHttpMode ? "convertly-remote" : "convertly-local",
-    version: "0.3.10",
+    version: "0.3.11",
   },
   {
     instructions: [
@@ -215,6 +220,15 @@ function kindForExtension(extension: string): FileEntry["mediaKind"] {
   if (archiveExtensions.has(extension)) return "archive";
   if (documentExtensions.has(extension)) return "document";
   return "other";
+}
+
+function normalizeConversionFormat(format: string) {
+  const requested = format.trim().toLowerCase().replace(/^\./, "");
+  const normalized = requested === "jpeg" ? "jpg" : requested === "tif" ? "tiff" : requested;
+  if (!conversionFormats.has(normalized)) {
+    throw new Error(`Unsupported conversion format '${format}'.`);
+  }
+  return normalized;
 }
 
 function labelForKind(kind: FileEntry["mediaKind"]) {
@@ -404,9 +418,10 @@ async function processMediaTool(
     const s = await stat(input);
     if (!s.isFile()) continue;
     const entry = toEntry(input, s);
-    const { downloadUrl } = await postMediaFile(endpoint, input, options.params);
+    const { downloadUrl, filename: processedFilename } = await postMediaFile(endpoint, input, options.params);
     const buffer = await downloadToBuffer(downloadUrl);
-    const ext = options.outputExt ? options.outputExt(entry) : entry.extension;
+    const apiExtension = path.extname(processedFilename).toLowerCase();
+    const ext = options.outputExt ? options.outputExt(entry) : apiExtension || entry.extension;
     const target = uniqueOutputPath(path.join(outputDir, `${path.basename(entry.name, entry.extension)}${ext}`));
     await writeFile(target, buffer);
     results.push({ from: input, to: target, originalBytes: entry.sizeBytes, outputBytes: buffer.byteLength });
@@ -904,16 +919,18 @@ server.registerTool(
     },
   },
   async ({ files, folder, outputFolder, format, recursive, compression, resize, resizeWidth, resizeHeight, limit }) => {
+    const outputFormat = normalizeConversionFormat(format);
     const result = await processMediaTool("/api/convert", {
       files, folder, outputFolder, recursive, limit,
-      params: { format, compression: String(compression), resize: resize ?? "", resizeWidth: resizeWidth ? String(resizeWidth) : "", resizeHeight: resizeHeight ? String(resizeHeight) : "" },
+      params: { format: outputFormat, compression: String(compression), resize: resize ?? "", resizeWidth: resizeWidth ? String(resizeWidth) : "", resizeHeight: resizeHeight ? String(resizeHeight) : "" },
+      outputExt: () => `.${outputFormat}`,
     });
     return jsonResult({
       success: result.processedCount > 0,
       message: result.processedCount > 0
-        ? `Converted ${result.processedCount} file${result.processedCount === 1 ? "" : "s"} to ${format.toUpperCase()}.`
+        ? `Converted ${result.processedCount} file${result.processedCount === 1 ? "" : "s"} to ${outputFormat.toUpperCase()}.`
         : "No files matched the input — the path may be outside approved roots, or the folder is empty.",
-      format,
+      format: outputFormat,
       convertedCount: result.processedCount,
       converted: result.results,
     });
@@ -952,6 +969,7 @@ server.registerTool(
         resizeWidth: "",
         resizeHeight: "",
       },
+      outputExt: () => ".svg",
     });
     return jsonResult({
       success: result.processedCount > 0,
